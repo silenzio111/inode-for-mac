@@ -3,6 +3,7 @@
 #include "EAPTrace.h"
 #include "AppleEAP.h"
 #include "PrivilegeBroker.h"
+#include "EnginePipes.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <fcntl.h>
@@ -110,14 +111,20 @@ static int session_main(int argc,char **argv,const char *vendor_template_overrid
     pcap_t *trace=NULL;uint8_t local_mac[6]={0};
     int rx=-1,tx=-1,failed=0,online=0,previous_state=-2,previous_aux=-2;time_t started=time(NULL),last_status=0,last_reply=0;uint8_t buffer[32768];size_t used=0;
     if(launched) {event("error","原厂引擎无法启动，请检查 Rosetta 和组件完整性");failed=1;goto done;}
-    snprintf(fifo,sizeof(fifo),"%s/ipc-node/iNodeClient",runtime);
-    while(time(NULL)-started<25 && !stopped && access(stop,F_OK)!=0) {
-        int status;if(waitpid(engine_pid,&status,WNOHANG)==engine_pid) {engine_pid=0;event("error","原厂引擎启动后退出");failed=1;goto done;}
-        struct stat fs;if(!lstat(fifo,&fs) && S_ISFIFO(fs.st_mode)) {rx=open(fifo,O_RDWR|O_NONBLOCK|O_NOFOLLOW);break;}
-        usleep(100000);
+    char client_fifo[1300];snprintf(client_fifo,sizeof(client_fifo),"%s/ipc-node/iNodeClient",runtime);
+    snprintf(fifo,sizeof(fifo),"%s/ipc-node/iNodeCmn",runtime);
+    event("phase","正在等待原厂认证控制接口…");
+    EnginePipesResult pipes=engine_pipes_wait(client_fifo,fifo,stop,&engine_pid,&stopped,40,&rx,&tx);
+    if(pipes!=ENGINE_PIPES_READY) {
+        if(pipes==ENGINE_PIPES_ENGINE_EXITED) event("error","原厂引擎启动后退出");
+        else if(pipes==ENGINE_PIPES_TIMEOUT) {
+            if(rx<0 && tx<0) event("error","原厂认证双向控制管道均未就绪（等待 40 秒）");
+            else event("error",rx<0?"原厂认证回执管道等待超时（40 秒）":"原厂认证命令管道等待超时（40 秒）");
+        }
+        else if(pipes==ENGINE_PIPES_ERROR) event("error","原厂认证控制接口无法打开，请检查组件运行目录");
+        failed=pipes!=ENGINE_PIPES_STOPPED;
+        goto done;
     }
-    snprintf(fifo,sizeof(fifo),"%s/ipc-node/iNodeCmn",runtime);tx=open(fifo,O_WRONLY|O_NONBLOCK|O_NOFOLLOW);
-    if(rx<0 || tx<0) {event("error","原厂认证控制接口未就绪");failed=1;goto done;}
     event("notice","已连接 Mac 原厂认证控制接口（命名管道）");
     if(!probe) event("notice",strchr(user,'@')?"认证账号已包含域后缀；密码原样提交":"认证账号未指定域后缀；密码原样提交");
     if(!probe) {

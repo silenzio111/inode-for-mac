@@ -66,15 +66,3 @@ struct MinimizeOnClose: NSViewRepresentable {
         coordinator.uninstall()
     }
 }
-
-@MainActor final class AppLifecycle: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag, let window = sender.windows.first(where: { $0.isMiniaturized }) {
-            window.deminiaturize(nil)
-            window.makeKeyAndOrderFront(nil)
-        }
-        return true
-    }
-}

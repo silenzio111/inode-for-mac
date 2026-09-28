@@ -61,7 +61,11 @@ enum PasswordStore {
     @Published var password = ""
     @Published var realm = UserDefaults.standard.string(forKey: "realm") ?? "移动"
     @Published var authMode = UserDefaults.standard.string(forKey: "authMode") ?? "vendor"
-    @Published var remember = UserDefaults.standard.bool(forKey: "remember")
+    @Published var remember = UserDefaults.standard.object(forKey: "remember") as? Bool ?? true
+    @Published var autoConnect = UserDefaults.standard.object(forKey: "autoConnect") as? Bool ?? true
+    @Published var launchAtLogin = LoginItem.isEnabled()
+    @Published var showDockIcon = UserDefaults.standard.bool(forKey: "showDockIcon")
+    @Published var preferencesMessage = ""
     @Published var serviceGBK = UserDefaults.standard.bool(forKey: "serviceGBK")
     @Published var xorMode = UserDefaults.standard.bool(forKey: "xorMode")
     @Published var busy = false
@@ -81,6 +85,7 @@ enum PasswordStore {
     private var terminated = false
     private var authorizing = false
     private var attemptedInternet = false
+    private var startupPending = false
     var account: String {
         username.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -92,9 +97,10 @@ enum PasswordStore {
     var headline: String {
         if internet { return "已连接" }
         if error { return "需要处理" }
-        if authenticated && !hasIP { return "正在等待 IP 地址" }
+        if authenticated && !hasIP { return "正在等待学校服务器分配 IP" }
         if authenticated && checkingInternet { return "正在检测网络连接" }
         if authenticated { return "认证已通过" }
+        if startupPending { return "等待有线网卡" }
         return busy ? "正在连接" : "连接校园网"
     }
     var internetDetail: String {
@@ -106,9 +112,14 @@ enum PasswordStore {
     init() {
         password = PasswordStore.load(credentialKey)
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        startupPending = autoConnect && !account.isEmpty && !password.isEmpty &&
+            ProcessInfo.processInfo.environment["INODE_DISABLE_AUTO_CONNECT"] != "1"
+        if startupPending && adapter?.active != true { message = "等待上次使用的有线网卡接入…" }
+        let poller = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+        RunLoop.main.add(poller, forMode: .common)
+        timer = poller
     }
     func addLog(_ s: String) {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
@@ -141,7 +152,12 @@ enum PasswordStore {
     }
     func loadPassword() { password = PasswordStore.load(credentialKey) }
     func tick() {
-        if Date().timeIntervalSince(lastScan) >= 4 { refresh() }
+        if Date().timeIntervalSince(lastScan) >= 2 { refresh() }
+        if startupPending && adapter?.active == true {
+            startupPending = false
+            addLog("使用上次保存的配置自动连接")
+            connect()
+        }
         guard let session else { return }
         let text = (try? String(contentsOf: session.appendingPathComponent("events"), encoding: .utf8)) ?? ""
         let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
@@ -200,6 +216,7 @@ enum PasswordStore {
         if !checkingInternet { attemptedInternet = false; internet = false; googleReachable = nil; baiduReachable = nil; checkInternet() }
     }
     func connect() {
+        startupPending = false
         guard !busy else { return }
         guard adapter?.active == true else { error = true; message = "请先插好网线，并选择已接入的有线网卡。"; return }
         let service = realm.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -249,6 +266,7 @@ enum PasswordStore {
         } catch { busy = false; self.error = true; message = "无法启动认证组件：\(error.localizedDescription)"; cleanup() }
     }
     func disconnect() {
+        startupPending = false
         if let session { FileManager.default.createFile(atPath: session.appendingPathComponent("stop").path, contents: Data(), attributes: [.posixPermissions: 0o600]) }
         authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; message = "正在断开有线认证…"
         if session == nil { busy = false }
@@ -264,11 +282,46 @@ enum PasswordStore {
         session = nil; terminated = false
     }
     func forgetPassword() { PasswordStore.delete(credentialKey); password = ""; remember = false; UserDefaults.standard.set(false, forKey: "remember"); addLog("已移除此账号的钥匙串密码") }
+    func setRemember(_ enabled: Bool) {
+        remember = enabled
+        UserDefaults.standard.set(enabled, forKey: "remember")
+        preferencesMessage = ""
+        if enabled {
+            if !account.isEmpty && !password.isEmpty && !PasswordStore.save(credentialKey, password) {
+                preferencesMessage = "密码未能保存到钥匙串，请检查系统钥匙串权限。"
+            }
+        } else {
+            PasswordStore.delete(credentialKey)
+            startupPending = false
+        }
+    }
+    func setAutoConnect(_ enabled: Bool) {
+        autoConnect = enabled
+        UserDefaults.standard.set(enabled, forKey: "autoConnect")
+        if !enabled { startupPending = false }
+    }
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try LoginItem.setEnabled(enabled)
+            launchAtLogin = enabled
+            preferencesMessage = ""
+            addLog(enabled ? "已开启登录后启动" : "已关闭登录后启动")
+        } catch {
+            launchAtLogin = LoginItem.isEnabled()
+            preferencesMessage = "无法修改开机自启：\(error.localizedDescription)"
+            addLog(preferencesMessage)
+        }
+    }
+    func setShowDockIcon(_ enabled: Bool) {
+        showDockIcon = enabled
+        UserDefaults.standard.set(enabled, forKey: "showDockIcon")
+        NSApp.setActivationPolicy(enabled ? .regular : .accessory)
+    }
 }
 
 let green = Color(red: 0.08, green: 0.55, blue: 0.36)
 struct ContentView: View {
-    @StateObject var model = Connection()
+    @ObservedObject var model: Connection
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 28) {
@@ -280,6 +333,19 @@ struct ContentView: View {
                 step(1, "有线链路", model.adapter?.active == true ? "网线已接入" : "等待接入", model.adapter?.active == true)
                 step(2, "校园网认证", model.authenticated ? "已通过" : (model.busy ? "认证中" : "等待认证"), model.authenticated)
                 step(3, "网络地址", model.hasIP ? "已获取" : "等待获取", model.hasIP)
+                Divider()
+                Text("启动与显示").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("开机自启", isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
+                    Toggle("启动后自动连接", isOn: Binding(get: { model.autoConnect }, set: { model.setAutoConnect($0) }))
+                    Toggle("在 Dock 显示图标", isOn: Binding(get: { model.showDockIcon }, set: { model.setShowDockIcon($0) }))
+                }.toggleStyle(.checkbox).font(.caption)
+                if !model.preferencesMessage.isEmpty {
+                    Text(model.preferencesMessage).font(.caption2).foregroundStyle(.orange)
+                }
+                if model.autoConnect && !model.remember {
+                    Text("自动连接需要先保存密码并成功连接一次。").font(.caption2).foregroundStyle(.secondary)
+                }
                 Spacer()
             }.padding(26).frame(width: 225).frame(maxHeight: .infinity).background(Color(nsColor: .controlBackgroundColor))
             Divider()
@@ -303,7 +369,7 @@ struct ContentView: View {
                             field("密码") { SecureField("校园网密码", text: $model.password) }
                         }
                         HStack {
-                            Toggle("保存到 macOS 钥匙串", isOn: $model.remember).toggleStyle(.checkbox)
+                            Toggle("保存到 macOS 钥匙串", isOn: Binding(get: { model.remember }, set: { model.setRemember($0) })).toggleStyle(.checkbox)
                             Spacer()
                             Button("清除已保存密码") { model.forgetPassword() }.buttonStyle(.link)
                         }.font(.caption)
@@ -370,7 +436,6 @@ struct ContentView: View {
                     Button("复制日志") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(model.logs.joined(separator: "\n"), forType: .string) }
                 }.padding(24).frame(width: 690, height: 420)
             }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.disconnect() }
     }
     func step(_ n: Int, _ title: String, _ detail: String, _ done: Bool) -> some View {
         HStack(alignment: .top, spacing: 13) {
@@ -385,10 +450,68 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 7) { Text(label).font(.caption).foregroundStyle(.secondary); content().textFieldStyle(.roundedBorder).controlSize(.large) }
     }
 }
+@MainActor final class AppLifecycle: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var model: Connection?
+    private var mainWindow: NSWindow?
+    private var statusItem: NSStatusItem?
+    private var statusMenuItem: NSMenuItem?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let connection = Connection()
+        model = connection
+        NSApp.setActivationPolicy(connection.showDockIcon ? .regular : .accessory)
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(systemSymbolName: "network", accessibilityDescription: "iNode for Mac")
+        item.button?.image?.isTemplate = true
+        let menu = NSMenu()
+        menu.delegate = self
+        let state = NSMenuItem(title: connection.headline, action: nil, keyEquivalent: "")
+        state.isEnabled = false
+        statusMenuItem = state
+        menu.addItem(state)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "打开主界面", action: #selector(openMainWindow), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "退出 iNode for Mac", action: #selector(quit), keyEquivalent: "q"))
+        for entry in menu.items where entry.action != nil { entry.target = self }
+        item.menu = menu
+        statusItem = item
+
+        if !ProcessInfo.processInfo.arguments.contains("--launched-at-login") { openMainWindow() }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) { statusMenuItem?.title = model?.headline ?? "iNode for Mac" }
+
+    @objc private func openMainWindow() {
+        guard let model else { return }
+        if mainWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 780),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                  backing: .buffered, defer: false)
+            window.title = "iNode for Mac"
+            window.minSize = NSSize(width: 920, height: 770)
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: ContentView(model: model))
+            window.center()
+            mainWindow = window
+        }
+        if mainWindow?.isMiniaturized == true { mainWindow?.deminiaturize(nil) }
+        mainWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func quit() { NSApp.terminate(nil) }
+
+    func applicationWillTerminate(_ notification: Notification) { model?.disconnect() }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { openMainWindow() }
+        return true
+    }
+}
+
 @main struct InodeMac: App {
     @NSApplicationDelegateAdaptor(AppLifecycle.self) private var lifecycle
-    var body: some Scene {
-        WindowGroup("iNode for Mac") { ContentView() }.windowStyle(.titleBar).defaultSize(width: 980, height: 780)
-            .commands { CommandGroup(replacing: .newItem) {} }
-    }
+    var body: some Scene { Settings { EmptyView() } }
 }

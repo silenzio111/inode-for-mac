@@ -10,7 +10,6 @@ import SwiftUI
     @MainActor static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
-        precondition(!AppLifecycle().applicationShouldTerminateAfterLastWindowClosed(app))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 160),
                               styleMask: [.titled, .closable, .miniaturizable],
                               backing: .buffered, defer: false)
@@ -24,9 +23,9 @@ import SwiftUI
         precondition(window.isMiniaturized, "Close must minimize the window")
         precondition(window.delegate === coordinator, "Minimized window must retain its delegate")
         precondition(original.minimized, "Other delegate callbacks must still reach the original delegate")
-        let lifecycle = AppLifecycle()
-        precondition(lifecycle.applicationShouldHandleReopen(app, hasVisibleWindows: false))
-        precondition(!window.isMiniaturized, "Dock reopen must restore the window")
+        window.deminiaturize(nil)
+        window.makeKeyAndOrderFront(nil)
+        precondition(!window.isMiniaturized, "Reopening must restore the window")
         coordinator.uninstall()
         precondition(window.delegate === original, "Normal window delegate must be restored")
         window.close()

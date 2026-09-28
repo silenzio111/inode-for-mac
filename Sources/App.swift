@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import Darwin
 
 struct Adapter: Identifiable, Hashable {
     var id: String
@@ -17,13 +18,15 @@ func run(_ path: String, _ args: [String]) -> (Int32, String) {
         return (p.terminationStatus, String(data: bytes, encoding: .utf8) ?? "")
     } catch { return (-1, error.localizedDescription) }
 }
-private func canReachSite(_ url: String) -> Bool {
-    let result = run("/usr/bin/curl", ["--ipv4", "--noproxy", "*", "--connect-timeout", "4", "--max-time", "7", "--max-redirs", "0", "--silent", "--output", "/dev/null", "--write-out", "%{http_code}", url])
+private func canReachSite(_ url: String, on interface: String) -> Bool {
+    let result = run("/usr/bin/curl", ["--ipv4", "--interface", "if!\(interface)", "--noproxy", "*", "--connect-timeout", "4", "--max-time", "7", "--max-redirs", "0", "--silent", "--output", "/dev/null", "--write-out", "%{http_code}", url])
     let status = Int(result.1.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     return result.0 == 0 && (200...299).contains(status)
 }
-private func checkGoogleAndBaidu() -> (google: Bool, baidu: Bool) {
-    (canReachSite("https://www.google.com/generate_204"), canReachSite("https://www.baidu.com/"))
+private func checkGoogleAndBaidu(on interface: String) async -> (google: Bool, baidu: Bool) {
+    let google = Task.detached { canReachSite("https://www.google.com/generate_204", on: interface) }
+    let baidu = Task.detached { canReachSite("https://www.baidu.com/", on: interface) }
+    return (await google.value, await baidu.value)
 }
 func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 func appleQuote(_ value: String) -> String {
@@ -47,6 +50,7 @@ func appleQuote(_ value: String) -> String {
     @Published var xorMode = UserDefaults.standard.bool(forKey: "xorMode")
     @Published var busy = false
     @Published var authenticated = false
+    @Published var detectedEthernetOnline = false
     @Published var internet = false
     @Published var googleReachable: Bool?
     @Published var baiduReachable: Bool?
@@ -63,6 +67,15 @@ func appleQuote(_ value: String) -> String {
     private var authorizing = false
     private var attemptedInternet = false
     private var startupPending = false
+    private var startupProbePending = true
+    #if INODE_TESTING
+    private let automaticEthernetProbeEnabled = false
+    #else
+    private let automaticEthernetProbeEnabled = ProcessInfo.processInfo.environment["INODE_DISABLE_STARTUP_PROBE"] != "1"
+    #endif
+    private var ethernetProbeRunning = false
+    private var ethernetProbeGeneration = 0
+    private var detectedEthernetAddress: String?
     private var retryAttempt = 0
     @Published private(set) var retryDeadline: Date?
     private var userRequestedStop = false
@@ -73,12 +86,14 @@ func appleQuote(_ value: String) -> String {
     var submittedAccount: String { campusSubmittedAccount(account, realm: realm) }
 
     var adapter: Adapter? { adapters.first { $0.id == selected } }
-    var hasIP: Bool { authenticated && !(adapter?.ip ?? "").isEmpty }
+    var campusReady: Bool { authenticated || detectedEthernetOnline }
+    var hasIP: Bool { campusReady && !(adapter?.ip ?? "").isEmpty }
     var retryScheduled: Bool { retryDeadline != nil }
     var headline: String {
         if internet { return "已连接" }
         if retryScheduled { return "正在自动重试" }
         if error { return "需要处理" }
+        if ethernetProbeRunning { return "正在检测有线网络" }
         if authenticated && !hasIP { return "正在等待学校服务器分配 IP" }
         if authenticated && checkingInternet { return "正在检测网络连接" }
         if authenticated { return "认证已通过" }
@@ -91,7 +106,7 @@ func appleQuote(_ value: String) -> String {
         if !attemptedInternet { return "尚未检测网络连接" }
         return internet ? "网络连接正常" : "网络连接测试未通过"
     }
-    init() {
+    init(restartHandoff: RestartHandoff? = nil) {
         retryLimit = min(10, max(0, retryLimit))
         let oldAccount = UserDefaults.standard.string(forKey: "username")
         UserDefaults.standard.removeObject(forKey: "username")
@@ -117,7 +132,25 @@ func appleQuote(_ value: String) -> String {
         username = oldAccount ?? ""
         #endif
         refresh()
+        userRequestedStop = restartHandoff?.userRequestedStop ?? false
+        if let broker = restartHandoff?.brokerDirectory,
+           RestartHandoff.isPrivateDirectory(broker, prefix: "inode-broker-") {
+            brokerDirectory = broker
+            addLog(PrivilegeBroker.isRunning(in: broker) ? "已接管重启前授权的认证组件" : "正在等待重启前授权的认证组件就绪")
+        }
+        if let previous = restartHandoff?.sessionDirectory,
+           RestartHandoff.isPrivateDirectory(previous, prefix: "inode-"),
+           FileManager.default.fileExists(atPath: previous.appendingPathComponent("events").path) {
+            session = previous
+            busy = true
+            authorizing = false
+            launchTime = Date()
+            startupProbePending = false
+            addLog("已接管重启前的有线认证会话")
+            tick()
+        }
         startupPending = autoConnect && !account.isEmpty && !password.isEmpty &&
+            session == nil && !retryScheduled && !userRequestedStop &&
             ProcessInfo.processInfo.environment["INODE_DISABLE_AUTO_CONNECT"] != "1"
         if startupPending && adapter?.active != true { message = "等待上次使用的有线网卡接入…" }
         let poller = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
@@ -125,6 +158,7 @@ func appleQuote(_ value: String) -> String {
         }
         RunLoop.main.add(poller, forMode: .common)
         timer = poller
+        if session == nil { probeEthernetIfAvailable() }
     }
     func addLog(_ s: String) {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
@@ -149,8 +183,19 @@ func appleQuote(_ value: String) -> String {
             found.append(Adapter(id: id, name: name, active: config.contains("status: active"), ip: ip))
         }
         adapters = found.sorted { $0.active && !$1.active }
-        if !found.contains(where: { $0.id == selected }), let first = adapters.first { selected = first.id }
+        if !found.contains(where: { $0.id == selected }), let first = adapters.first { selectAdapter(first.id) }
         lastScan = Date()
+        if detectedEthernetOnline && (adapter?.active != true || adapter?.ip != detectedEthernetAddress) {
+            detectedEthernetOnline = false
+            detectedEthernetAddress = nil
+            internet = false
+            googleReachable = nil
+            baiduReachable = nil
+            attemptedInternet = false
+            startupProbePending = true
+            startupPending = autoConnect && !account.isEmpty && !password.isEmpty
+            message = "有线网络状态已改变，正在重新检查。"
+        }
         if authenticated && adapter?.active != true {
             disconnect(); error = true; message = "网线已断开，请重新连接。"
         }
@@ -160,9 +205,26 @@ func appleQuote(_ value: String) -> String {
               saved.account == account, saved.realm == realm else { password = ""; return }
         password = saved.password
     }
+    func selectAdapter(_ identifier: String) {
+        guard selected != identifier else { return }
+        cancelEthernetProbe()
+        selected = identifier
+        UserDefaults.standard.set(identifier, forKey: "adapter")
+        if detectedEthernetOnline {
+            detectedEthernetOnline = false
+            detectedEthernetAddress = nil
+            internet = false
+            googleReachable = nil
+            baiduReachable = nil
+            attemptedInternet = false
+        }
+        startupProbePending = true
+        if session == nil && !busy { message = "正在检查所选有线网卡…" }
+    }
     func tick() {
         if Date().timeIntervalSince(lastScan) >= 2 { refresh() }
-        if startupPending && adapter?.active == true {
+        if startupProbePending && session == nil { probeEthernetIfAvailable() }
+        if startupPending && !ethernetProbeRunning && adapter?.active == true {
             startupPending = false
             addLog("使用上次保存的配置自动连接")
             connect()
@@ -218,17 +280,70 @@ func appleQuote(_ value: String) -> String {
         internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false
         message = "正在等待学校服务器分配 IP 地址…"
     }
+    private func probeEthernetIfAvailable() {
+        guard automaticEthernetProbeEnabled, startupProbePending, let adapter, adapter.active else { return }
+        startupProbePending = false
+        guard !adapter.ip.isEmpty, session == nil, !busy else { return }
+        startEthernetProbe(on: adapter)
+    }
+    private func startEthernetProbe(on adapter: Adapter) {
+        guard !ethernetProbeRunning else { return }
+        ethernetProbeGeneration += 1
+        let generation = ethernetProbeGeneration
+        ethernetProbeRunning = true
+        checkingInternet = true
+        error = false
+        message = "正在通过所选有线网卡检测网络连接…"
+        let interface = adapter.id, address = adapter.ip
+        Task {
+            let result = await checkGoogleAndBaidu(on: interface)
+            guard generation == ethernetProbeGeneration else { return }
+            ethernetProbeRunning = false
+            checkingInternet = false
+            applyEthernetProbeResult(result, interface: interface, address: address)
+        }
+    }
+    func applyEthernetProbeResult(_ result: (google: Bool, baidu: Bool), interface: String, address: String) {
+        guard session == nil, !busy else { return }
+        guard selected == interface, adapter?.active == true, adapter?.ip == address else {
+            startupProbePending = true
+            return
+        }
+        googleReachable = result.google
+        baiduReachable = result.baidu
+        attemptedInternet = true
+        if result.google || result.baidu {
+            detectedEthernetOnline = true
+            detectedEthernetAddress = address
+            internet = true
+            startupPending = false
+            error = false
+            message = "选中的有线网卡可正常上网，无需重复认证。"
+            addLog("启动检测：所选有线网卡可正常上网，跳过重复认证")
+        } else {
+            detectedEthernetOnline = false
+            detectedEthernetAddress = nil
+            internet = false
+            message = startupPending ? "有线网络尚未连通，准备使用上次配置认证…" : "有线网络尚未连通，请连接校园网。"
+            addLog("所选有线网卡网络测试未通过")
+        }
+    }
+    private func cancelEthernetProbe() {
+        ethernetProbeGeneration += 1
+        ethernetProbeRunning = false
+        checkingInternet = false
+        startupProbePending = false
+    }
     func checkInternet() {
         guard let current = session, authenticated, hasIP else { return }
         let testedAddress = adapter?.ip
+        let interface = selected
         checkingInternet = true; attemptedInternet = true
         message = "已取得有线 IP 地址，正在检测网络连通性…"
         Task {
-            let result = await Task.detached {
-                checkGoogleAndBaidu()
-            }.value
+            let result = await checkGoogleAndBaidu(on: interface)
             guard session == current, authenticated else { checkingInternet = false; return }
-            guard hasIP, adapter?.ip == testedAddress else {
+            guard hasIP, selected == interface, adapter?.ip == testedAddress else {
                 checkingInternet = false; attemptedInternet = false
                 if !hasIP { waitForAddress() }
                 return
@@ -237,17 +352,25 @@ func appleQuote(_ value: String) -> String {
             internet = result.google || result.baidu
             checkingInternet = false
             message = internet ? "网络连接正常。" : "校园网认证已通过，网络连接测试未通过。"
-            addLog("系统网络测试：\(internetDetail)；认证状态单独判定")
+            addLog("所选有线网卡网络测试：\(internetDetail)；认证状态单独判定")
             // Mark this attempt as finished; retry only on explicit refresh.
         }
     }
     func manualRefresh() {
         refresh()
+        if session == nil, let adapter, adapter.active, !adapter.ip.isEmpty {
+            startEthernetProbe(on: adapter)
+            return
+        }
         guard authenticated else { return }
         guard hasIP else { waitForAddress(); return }
         if !checkingInternet { attemptedInternet = false; internet = false; googleReachable = nil; baiduReachable = nil; checkInternet() }
     }
     func connect() {
+        cancelEthernetProbe()
+        detectedEthernetOnline = false
+        detectedEthernetAddress = nil
+        internet = false
         startupPending = false
         retryDeadline = nil
         retryAttempt = 0
@@ -339,6 +462,9 @@ func appleQuote(_ value: String) -> String {
         } catch { busy = false; self.error = true; message = "无法启动认证组件：\(error.localizedDescription)"; cleanup() }
     }
     func disconnect() {
+        cancelEthernetProbe()
+        detectedEthernetOnline = false
+        detectedEthernetAddress = nil
         startupPending = false
         retryDeadline = nil
         userRequestedStop = true
@@ -350,6 +476,11 @@ func appleQuote(_ value: String) -> String {
     func shutdownBroker() {
         if let brokerDirectory { PrivilegeBroker.stop(in: brokerDirectory) }
         brokerDirectory = nil
+    }
+    var authorizationInProgress: Bool { authorizing }
+    func restartHandoff() -> RestartHandoff {
+        RestartHandoff(brokerDirectory: brokerDirectory, sessionDirectory: session,
+                       userRequestedStop: userRequestedStop)
     }
     private func cleanup() {
         if let session {
@@ -440,7 +571,8 @@ private enum WindowLayout {
 struct ContentView: View {
     @ObservedObject var model: Connection
     var onWindowClosed: () -> Void
-    private var compact: Bool { model.busy || model.retryScheduled || model.authenticated }
+    var onRestart: () -> Void
+    private var compact: Bool { model.busy || model.retryScheduled || model.campusReady }
     var body: some View {
         HStack(spacing: 0) {
             ScrollView {
@@ -451,8 +583,8 @@ struct ContentView: View {
                 }.padding(.bottom, compact ? 8 : 18)
                 Text("连接步骤").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
                 step(1, "有线链路", model.adapter?.active == true ? "网线已接入" : "等待接入", model.adapter?.active == true)
-                step(2, "校园网认证", model.authenticated ? "已通过" : (model.retryScheduled ? "即将重试" : (model.busy ? "认证中" : "等待认证")), model.authenticated)
-                step(3, "网络地址", model.hasIP ? "已获取" : (model.authenticated ? "等待获取" : "等待认证"), model.hasIP)
+                step(2, "校园网认证", model.authenticated ? "已通过" : (model.detectedEthernetOnline ? "有线已联网" : (model.retryScheduled ? "即将重试" : (model.busy ? "认证中" : "等待认证"))), model.campusReady)
+                step(3, "网络地址", model.hasIP ? "已获取" : (model.campusReady ? "等待获取" : "等待认证"), model.hasIP)
                 Divider()
                 Text("启动与显示").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 12) {
@@ -487,7 +619,7 @@ struct ContentView: View {
                     Spacer()
                     if model.busy && !model.authenticated { ProgressView().controlSize(.small) }
                 }.padding(26).frame(maxWidth: .infinity, alignment: .leading).background(green.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
-                if !model.busy && !model.retryScheduled {
+                if !model.busy && !model.retryScheduled && !model.detectedEthernetOnline {
                     VStack(alignment: .leading, spacing: 15) {
                         HStack { Text("校园网账号").font(.headline); Spacer(); Text("宿舍有线 · 移动").font(.caption).foregroundStyle(.secondary) }
                         HStack(spacing: 14) {
@@ -529,14 +661,14 @@ struct ContentView: View {
                     Text("连接信息").font(.headline)
                     HStack {
                         Label("有线网卡", systemImage: "point.3.connected.trianglepath.dotted").foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
-                        Picker("有线网卡", selection: $model.selected) {
+                        Picker("有线网卡", selection: Binding(get: { model.selected }, set: { model.selectAdapter($0) })) {
                             ForEach(model.adapters) { a in Text("\(a.name) · \(a.id)\(a.active ? "（已接入）" : "")").tag(a.id) }
                         }.labelsHidden().disabled(model.busy || model.retryScheduled)
                     }
                     Divider()
-                    info("IPv4 地址", "location", model.hasIP ? (model.adapter?.ip ?? "") : (model.authenticated ? "尚未取得有效地址" : "认证后检查地址"))
+                    info("IPv4 地址", "location", model.hasIP ? (model.adapter?.ip ?? "") : (model.campusReady ? "尚未取得有效地址" : "认证后检查地址"))
                     Divider()
-                    info("认证状态", "checkmark.shield", model.authenticated ? "校园网认证已通过" : "尚未通过认证")
+                    info("认证状态", "checkmark.shield", model.authenticated ? "校园网认证已通过" : (model.detectedEthernetOnline ? "有线网卡已联网，无需重复认证" : "尚未通过认证"))
                     Divider()
                     info("网络连通性", "globe", model.internetDetail)
                 }.padding(22).overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.1)))
@@ -565,9 +697,12 @@ struct ContentView: View {
     var actionBar: some View {
         HStack {
                     Button { model.showLog = true } label: { Label("连接日志", systemImage: "list.bullet.rectangle") }
+                    Button { onRestart() } label: { Label("重启软件", systemImage: "arrow.clockwise.circle") }
                     Spacer()
-                    Button { model.manualRefresh() } label: { Label("刷新状态", systemImage: "arrow.clockwise") }.disabled(model.checkingInternet && model.authenticated)
-                    if model.busy || model.retryScheduled {
+                    Button { model.manualRefresh() } label: { Label("刷新状态", systemImage: "arrow.clockwise") }.disabled(model.checkingInternet)
+                    if model.detectedEthernetOnline {
+                        Label("有线网络已连接", systemImage: "checkmark.circle.fill").foregroundStyle(green)
+                    } else if model.busy || model.retryScheduled {
                         Button(role: .destructive) { model.disconnect() } label: { Label(model.retryScheduled ? "取消重试" : "断开连接", systemImage: "xmark") }
                     } else {
                         Button { model.connect() } label: { Label("连接校园网", systemImage: "bolt.fill") }.buttonStyle(.borderedProminent).tint(green)
@@ -594,9 +729,10 @@ struct ContentView: View {
     private var statusMenuItem: NSMenuItem?
     private var windowSizeObservation: AnyCancellable?
     private var mainWindowHiddenByUser = false
+    private var restartInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let connection = Connection()
+        let connection = Connection(restartHandoff: RestartHandoff(arguments: ProcessInfo.processInfo.arguments))
         model = connection
         NSApp.setActivationPolicy(.accessory)
 
@@ -611,6 +747,7 @@ struct ContentView: View {
         menu.addItem(state)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "打开主界面", action: #selector(openMainWindow), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "重启 iNode for Mac", action: #selector(restart), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出 iNode for Mac", action: #selector(quit), keyEquivalent: "q"))
         for entry in menu.items where entry.action != nil { entry.target = self }
@@ -621,8 +758,8 @@ struct ContentView: View {
 
         if !ProcessInfo.processInfo.arguments.contains("--launched-at-login") { openMainWindow() }
         windowSizeObservation = connection.$busy
-            .combineLatest(connection.$authenticated, connection.$retryDeadline)
-            .map { busy, authenticated, retryDeadline in busy || authenticated || retryDeadline != nil }
+            .combineLatest(connection.$authenticated, connection.$detectedEthernetOnline, connection.$retryDeadline)
+            .map { busy, authenticated, detectedOnline, retryDeadline in busy || authenticated || detectedOnline || retryDeadline != nil }
             .removeDuplicates()
             .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
             .sink { [weak self] compact in self?.resizeMainWindow(compact: compact) }
@@ -633,7 +770,7 @@ struct ContentView: View {
     @objc private func openMainWindow() {
         guard let model else { return }
         if mainWindow == nil {
-            let compact = model.busy || model.retryScheduled || model.authenticated
+            let compact = model.busy || model.retryScheduled || model.campusReady
             let height = compact ? WindowLayout.compactHeight : WindowLayout.editorHeight
             let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 980, height: height),
                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -647,7 +784,7 @@ struct ContentView: View {
             window.contentView = NSHostingView(rootView: ContentView(model: model, onWindowClosed: { [weak self] in
                 self?.mainWindowHiddenByUser = true
                 NSApp.setActivationPolicy(.accessory)
-            }))
+            }, onRestart: { [weak self] in self?.restart() }))
             window.center()
             mainWindow = window
         }
@@ -684,6 +821,34 @@ struct ContentView: View {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    @objc private func restart() {
+        guard !restartInProgress, let model else { return }
+        guard !model.authorizationInProgress else {
+            showRestartError("请先完成或取消当前管理员授权，再重启软件。")
+            return
+        }
+        guard let executable = Bundle.main.executableURL else {
+            showRestartError("无法定位应用程序，请重新安装后再试。")
+            return
+        }
+        restartInProgress = true
+        let handoff = model.restartHandoff()
+        UserDefaults.standard.synchronize()
+        DispatchQueue.main.async { [weak self] in
+            let failure = RestartProcess.replace(executable: executable, handoff: handoff)
+            self?.restartInProgress = false
+            self?.showRestartError("无法重启软件：\(String(cString: strerror(failure)))")
+        }
+    }
+
+    private func showRestartError(_ text: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "重启未完成"
+        alert.informativeText = text
+        alert.runModal()
+    }
 
     @objc private func restoreAfterAuthorization() {
         guard let window = mainWindow, !mainWindowHiddenByUser, !window.isMiniaturized, !window.isVisible else { return }

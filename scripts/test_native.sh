@@ -10,12 +10,15 @@ xcrun swiftc -swift-version 5 Sources/LoginItem.swift tests/login-item.swift -o 
 .build/login-item-tests
 xcrun swiftc -swift-version 5 Sources/CredentialStore.swift tests/credential-store.swift -o .build/credential-store-tests
 .build/credential-store-tests
-xcrun swiftc -swift-version 5 -D INODE_TESTING -parse-as-library Sources/AccountFormat.swift Sources/CredentialStore.swift Sources/LoginItem.swift Sources/PrivilegeBroker.swift Sources/WindowCloseBehavior.swift Sources/App.swift tests/connection-retry.swift -o .build/connection-retry-tests
+xcrun swiftc -swift-version 5 Sources/RestartHandoff.swift tests/restart-handoff.swift -o .build/restart-handoff-tests
+.build/restart-handoff-tests
+xcrun swiftc -swift-version 5 -D INODE_TESTING -parse-as-library Sources/AccountFormat.swift Sources/CredentialStore.swift Sources/LoginItem.swift Sources/PrivilegeBroker.swift Sources/RestartHandoff.swift Sources/WindowCloseBehavior.swift Sources/App.swift tests/connection-retry.swift -o .build/connection-retry-tests
 INODE_DISABLE_AUTO_CONNECT=1 .build/connection-retry-tests
 xcrun clang -g -Wall -Wextra Sources/EnginePipes.c tests/engine-pipes.c -o .build/engine-pipes-tests
 .build/engine-pipes-tests
 xcrun clang -DINODE_BROKER_TESTING -g -Wall -Wextra Sources/NativeIPC.c Sources/VendorNotice.c Sources/EAPTrace.c Sources/AppleEAP.c Sources/PrivilegeBroker.c Sources/EnginePipes.c Sources/VendorHelper.c -framework CoreFoundation -liconv -lpcap -o .build/broker-test-helper
 python3 tests/privilege-broker.py
+python3 tests/broker-restart.py
 xcrun clang -fsanitize=address,undefined -g Sources/AppleEAP.c tests/apple-eap.c -framework CoreFoundation -o .build/apple-eap-tests
 .build/apple-eap-tests
 xcrun clang -fsanitize=address,undefined -g Sources/NativeIPC.c Sources/VendorNotice.c Sources/EAPTrace.c tests/native-ipc.c -liconv -lpcap -o .build/native-ipc-tests

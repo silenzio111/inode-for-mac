@@ -11,6 +11,45 @@ import Foundation
         precondition(model.hasIP)
         model.authenticated = false
 
+        let alreadyOnline = Connection()
+        alreadyOnline.adapters = [Adapter(id: "en-test", name: "Synthetic Ethernet", active: true, ip: "10.0.0.8")]
+        alreadyOnline.selected = "en-test"
+        alreadyOnline.applyEthernetProbeResult((google: true, baidu: false), interface: "en-other", address: "10.0.0.8")
+        precondition(!alreadyOnline.campusReady, "Another interface must not mark this Ethernet link online")
+        alreadyOnline.applyEthernetProbeResult((google: true, baidu: false), interface: "en-test", address: "10.0.0.7")
+        precondition(!alreadyOnline.campusReady, "A stale address must not mark the link online")
+        alreadyOnline.applyEthernetProbeResult((google: true, baidu: false), interface: "en-test", address: "10.0.0.8")
+        precondition(alreadyOnline.detectedEthernetOnline && alreadyOnline.hasIP && alreadyOnline.internet)
+        precondition(!alreadyOnline.authenticated, "A website probe must not claim an engine authentication result")
+        precondition(alreadyOnline.headline == "已连接")
+        alreadyOnline.selectAdapter("en-other")
+        precondition(!alreadyOnline.detectedEthernetOnline && !alreadyOnline.internet,
+                     "Changing the selected adapter must clear the old Ethernet result")
+
+        let previousSession = FileManager.default.temporaryDirectory.appendingPathComponent("inode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: previousSession, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        FileManager.default.createFile(atPath: previousSession.appendingPathComponent("events").path,
+                                       contents: Data("starting\tRestored session\n".utf8),
+                                       attributes: [.posixPermissions: 0o600])
+        let resumed = Connection(restartHandoff: RestartHandoff(brokerDirectory: nil, sessionDirectory: previousSession))
+        precondition(resumed.busy && resumed.logs.contains(where: { $0.contains("Restored session") }),
+                     "Restart must attach to the existing session without starting another one")
+        try FileManager.default.removeItem(at: previousSession)
+
+        let stoppedBeforeRestart = FileManager.default.temporaryDirectory.appendingPathComponent("inode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stoppedBeforeRestart, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        FileManager.default.createFile(atPath: stoppedBeforeRestart.appendingPathComponent("events").path,
+                                       contents: Data("stopped\tUser requested stop\n".utf8),
+                                       attributes: [.posixPermissions: 0o600])
+        let resumedAfterStop = Connection(restartHandoff: RestartHandoff(brokerDirectory: nil,
+                                                                         sessionDirectory: stoppedBeforeRestart,
+                                                                         userRequestedStop: true))
+        precondition(!resumedAfterStop.retryScheduled && !resumedAfterStop.busy,
+                     "Restart must preserve an intentional disconnect")
+        try? FileManager.default.removeItem(at: stoppedBeforeRestart)
+
         let progress = Connection()
         let progressDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("inode-progress-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: progressDirectory, withIntermediateDirectories: false)
@@ -52,6 +91,6 @@ import Foundation
         disabled.useSyntheticSession(third)
         disabled.tick()
         precondition(!disabled.retryScheduled, "Zero retry limit must disable automatic retry")
-        print("Authentication-gated IP status, readable progress, bounded retry, and cancellation passed")
+        print("Ethernet-only startup result, authentication-gated IP status, progress, retry, and cancellation passed")
     }
 }

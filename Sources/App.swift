@@ -64,7 +64,7 @@ func appleQuote(_ value: String) -> String {
     private var attemptedInternet = false
     private var startupPending = false
     private var retryAttempt = 0
-    private var retryDeadline: Date?
+    @Published private(set) var retryDeadline: Date?
     private var userRequestedStop = false
     private var brokerDirectory: URL?
     var account: String {
@@ -187,11 +187,13 @@ func appleQuote(_ value: String) -> String {
                 let state = parts[0], detail = parts.dropFirst().joined(separator: "\t")
                 addLog(detail)
                 if state == "authenticated" { authenticated = true; retryAttempt = 0; error = false; message = detail }
+                else if state == "starting" && !error { message = "正在准备校园网认证…" }
+                else if state == "phase" && !authenticated && !error { message = detail }
                 else if state == "error" || state == "expired" { error = true; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; message = detail }
                 else if state == "stopped" {
                     busy = false; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; terminated = true
                     if !error { message = detail }
-                } else if !authenticated && !error { message = detail }
+                }
             }
             linesRead = lines.count
         }
@@ -437,7 +439,7 @@ private enum WindowLayout {
 }
 struct ContentView: View {
     @ObservedObject var model: Connection
-    private var compact: Bool { model.authenticated }
+    private var compact: Bool { model.busy || model.retryScheduled || model.authenticated }
     var body: some View {
         HStack(spacing: 0) {
             ScrollView {
@@ -616,9 +618,12 @@ struct ContentView: View {
                                                name: Notification.Name("inodeAuthorizationFinished"), object: nil)
 
         if !ProcessInfo.processInfo.arguments.contains("--launched-at-login") { openMainWindow() }
-        windowSizeObservation = connection.$authenticated.removeDuplicates()
+        windowSizeObservation = connection.$busy
+            .combineLatest(connection.$authenticated, connection.$retryDeadline)
+            .map { busy, authenticated, retryDeadline in busy || authenticated || retryDeadline != nil }
+            .removeDuplicates()
             .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
-            .sink { [weak self] connected in self?.resizeMainWindow(connected: connected) }
+            .sink { [weak self] compact in self?.resizeMainWindow(compact: compact) }
     }
 
     func menuWillOpen(_ menu: NSMenu) { statusMenuItem?.title = model?.headline ?? "iNode for Mac" }
@@ -626,14 +631,15 @@ struct ContentView: View {
     @objc private func openMainWindow() {
         guard let model else { return }
         if mainWindow == nil {
-            let height = model.authenticated ? WindowLayout.compactHeight : WindowLayout.editorHeight
+            let compact = model.busy || model.retryScheduled || model.authenticated
+            let height = compact ? WindowLayout.compactHeight : WindowLayout.editorHeight
             let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 980, height: height),
                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                  backing: .buffered, defer: false)
             window.title = "iNode for Mac"
             window.hidesOnDeactivate = false
             window.level = .normal
-            let minimumContentHeight = model.authenticated ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight
+            let minimumContentHeight = compact ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight
             window.minSize = NSSize(width: 920, height: frameHeight(for: minimumContentHeight, in: window))
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: ContentView(model: model))
@@ -649,13 +655,13 @@ struct ContentView: View {
         window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: 980, height: contentHeight)).height
     }
 
-    private func resizeMainWindow(connected: Bool) {
+    private func resizeMainWindow(compact: Bool) {
         guard let window = mainWindow else { return }
-        let contentHeight = connected ? WindowLayout.compactHeight : WindowLayout.editorHeight
-        let minimumContentHeight = connected ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight
+        let contentHeight = compact ? WindowLayout.compactHeight : WindowLayout.editorHeight
+        let minimumContentHeight = compact ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight
         let targetHeight = frameHeight(for: contentHeight, in: window)
         let minimumSize = NSSize(width: 920, height: frameHeight(for: minimumContentHeight, in: window))
-        if connected { window.minSize = minimumSize }
+        if compact { window.minSize = minimumSize }
         guard abs(window.frame.height - targetHeight) > 1 else {
             window.minSize = minimumSize
             return
@@ -667,7 +673,7 @@ struct ContentView: View {
             frame.origin.y = visible.minY
         }
         window.setFrame(frame, display: true, animate: window.isVisible)
-        if !connected { window.minSize = minimumSize }
+        if !compact { window.minSize = minimumSize }
     }
 
     @objc private func quit() { NSApp.terminate(nil) }

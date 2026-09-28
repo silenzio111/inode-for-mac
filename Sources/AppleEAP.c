@@ -96,6 +96,7 @@ int apple_eap_run(const char *device, const char *user, const char *password,
     }
     started = 1;
     event("notice", "macOS 已接收 PEAP 请求；开始认证，尚未确认成功");
+    event("phase", "正在等待校园网认证结果…");
     event("notice", "证书由 macOS 验证；如出现提示，请先核对服务器证书");
     time_t began = time(NULL);
     while (!*stop && access(stop_path, F_OK) != 0) {
@@ -115,7 +116,10 @@ int apple_eap_run(const char *device, const char *user, const char *password,
                     char message[180];
                     snprintf(message, sizeof(message), "macOS 认证状态：会话 %d，阶段 %d，结果 %d，EAP 方法 %d", state, supp, client, type);
                     event("notice", message); last_state = state; last_supp = supp; last_client = client; last_type = type;
-                    if (client == 14 || client == 3 || client == 20) event("notice", "macOS 正在等待认证信息或服务器证书确认");
+                    if (client == 14 || client == 3 || client == 20) {
+                        event("notice", "macOS 正在等待认证信息或服务器证书确认");
+                        event("phase", "请检查 macOS 的认证信息或证书确认提示…");
+                    }
                 }
                 int phase = apple_eap_classify(status);
                 if (phase == 1 && !online) { online = 1; event("authenticated", "macOS 报告 PEAP 认证已通过，正在获取有线地址"); }

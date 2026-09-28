@@ -11,6 +11,19 @@ import Foundation
         precondition(model.hasIP)
         model.authenticated = false
 
+        let progress = Connection()
+        let progressDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("inode-progress-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: progressDirectory, withIntermediateDirectories: false)
+        let progressEvents = progressDirectory.appendingPathComponent("events")
+        try "starting\tTechnical engine startup\nnotice\tE0585 control fields 48/49/50\n".write(to: progressEvents, atomically: true, encoding: .utf8)
+        progress.useSyntheticSession(progressDirectory)
+        progress.tick()
+        precondition(progress.message == "正在准备校园网认证…", "Technical notices must stay in the log")
+        try "starting\tTechnical engine startup\nnotice\tE0585 control fields 48/49/50\nphase\t正在等待校园网认证结果…\n".write(to: progressEvents, atomically: true, encoding: .utf8)
+        progress.tick()
+        precondition(progress.message == "正在等待校园网认证结果…", "User-facing phases should update the banner")
+        try FileManager.default.removeItem(at: progressDirectory)
+
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("inode-retry-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         try "error\tSynthetic failure\nstopped\tSynthetic session ended\n".write(to: directory.appendingPathComponent("events"), atomically: true, encoding: .utf8)
@@ -39,6 +52,6 @@ import Foundation
         disabled.useSyntheticSession(third)
         disabled.tick()
         precondition(!disabled.retryScheduled, "Zero retry limit must disable automatic retry")
-        print("Authentication-gated IP status, bounded retry scheduling, and user cancellation passed")
+        print("Authentication-gated IP status, readable progress, bounded retry, and cancellation passed")
     }
 }

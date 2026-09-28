@@ -129,6 +129,7 @@ static int session_main(int argc,char **argv,const char *vendor_template_overrid
     if(!probe && !send_message(tx,1,user,pass,dev,service)) {event("error","无法向原厂引擎发送连接请求");failed=1;goto done;}
     /* Keep password only in memory to redact echoed notification text. */
     started=time(NULL);event("notice",probe?"仅查询状态，不发送认证凭据":"原厂引擎正在认证");
+    if(!probe) event("phase","正在等待校园网认证结果…");
     while(!stopped && access(stop,F_OK)!=0) {
         if(kill(parent_pid,0)<0 && errno==ESRCH) break;
         int status;if(waitpid(engine_pid,&status,WNOHANG)==engine_pid) {engine_pid=0;event("error","原厂认证进程已退出");failed=1;break;}

@@ -40,6 +40,7 @@ import SwiftUI
             .background(MinimizeOnClose().frame(width: 0, height: 0)))
         hostedWindow.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
+        var hostedChecked = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             precondition(hostedWindow.delegate is MinimizeOnCloseCoordinator,
                          "The SwiftUI window attachment must install the close handler")
@@ -51,9 +52,13 @@ import SwiftUI
             precondition(hostedWindow.isMiniaturized, "The hosted window must minimize")
             hostedWindow.deminiaturize(nil)
             hostedWindow.close()
-            app.stop(nil)
+            hostedChecked = true
         }
-        app.run()
+        let deadline = Date().addingTimeInterval(3)
+        while !hostedChecked && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        precondition(hostedChecked, "The hosted window check must finish promptly")
         print("Closing minimizes the window without destroying it")
     }
 }

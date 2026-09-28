@@ -2,6 +2,7 @@
 #include "VendorNotice.h"
 #include "EAPTrace.h"
 #include "AppleEAP.h"
+#include "PrivilegeBroker.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <fcntl.h>
@@ -36,7 +37,7 @@ static int read_line(FILE *f,char *buffer,size_t capacity) {
     if(!fgets(buffer,(int)capacity,f)) return 0;
     char *end=strchr(buffer,'\n');if(!end) return 0;*end=0;return 1;
 }
-int main(int argc,char **argv) {
+static int session_main(int argc,char **argv,const char *vendor_template_override) {
     if(argc!=3 || (strcmp(argv[1],"--session") && strcmp(argv[1],"--probe-session") && strcmp(argv[1],"--peap-session"))) { fprintf(stderr,"Usage: inode-helper --session|--peap-session DIR\n");return 2; }
     int probe=!strcmp(argv[1],"--probe-session");
     struct stat ds,cs;char cfg[1024],out[1024],stop[1024];
@@ -59,9 +60,16 @@ int main(int argc,char **argv) {
     }
     event("starting","原厂引擎后端 0.4.1：正在准备 Mac 认证组件");
     char resources[1024],template[1200],runtime[1200],config[1300],fifo[1300];
-    if(!realpath(argv[0],resources)) {event("error","无法定位认证组件");event("stopped","原厂认证会话已结束");fclose(events);return 1;}
-    char *slash=strrchr(resources,'/');if(!slash) return 1;*slash=0;
-    snprintf(template,sizeof(template),"%s/vendor-mac",resources);snprintf(runtime,sizeof(runtime),"%s/runtime",argv[2]);
+    if(vendor_template_override && vendor_template_override[0]) {
+        if(snprintf(template,sizeof(template),"%s",vendor_template_override)>=(int)sizeof(template)) {
+            event("error","认证组件路径过长");event("stopped","原厂认证会话已结束");fclose(events);return 1;
+        }
+    } else {
+        if(!realpath(argv[0],resources)) {event("error","无法定位认证组件");event("stopped","原厂认证会话已结束");fclose(events);return 1;}
+        char *slash=strrchr(resources,'/');if(!slash) return 1;*slash=0;
+        snprintf(template,sizeof(template),"%s/vendor-mac",resources);
+    }
+    snprintf(runtime,sizeof(runtime),"%s/runtime",argv[2]);
     struct stat engine_stat;
     snprintf(config,sizeof(config),"%s/AuthenMngService",template);
     if(stat(config,&engine_stat)!=0) {
@@ -169,4 +177,15 @@ int main(int argc,char **argv) {
     if(engine_pid>0) {kill(engine_pid,SIGTERM);for(int j=0;j<20;j++) {if(waitpid(engine_pid,NULL,WNOHANG)==engine_pid) {engine_pid=0;break;}usleep(100000);}if(engine_pid>0) {kill(engine_pid,SIGKILL);waitpid(engine_pid,NULL,0);}}
     wipe_password(pass,sizeof(pass));chdir("/");char *remove[]={"/bin/rm","-rf",runtime,NULL};command(remove);
     event("stopped",failed?"原厂认证会话已结束":"已断开原厂认证");fclose(events);return failed?1:0;
+}
+
+static int broker_session(const char *session,const char *vendor_template) {
+    char *arguments[]={"inode-helper","--session",(char *)session,NULL};
+    return session_main(3,arguments,vendor_template);
+}
+
+int main(int argc,char **argv) {
+    if(argc==4 && !strcmp(argv[1],"--broker"))
+        return privilege_broker_run(argv[2],argv[3],argv[0],broker_session);
+    return session_main(argc,argv,NULL);
 }

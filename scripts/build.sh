@@ -24,9 +24,9 @@ shutil.copytree(src,dst,symlinks=True,ignore=shutil.ignore_patterns('log','ipc-n
 (dst/'inodesys.conf').write_text('INSTALL_DIR=.\n')
 PYCOPY
 fi
-xcrun clang -arch "$arch" -mmacosx-version-min=13.0 -O2 -Wall -Wextra Sources/NativeIPC.c Sources/VendorNotice.c Sources/EAPTrace.c Sources/AppleEAP.c Sources/VendorHelper.c -framework CoreFoundation -liconv -lpcap -o "$app/Contents/Resources/inode-helper"
+xcrun clang -arch "$arch" -mmacosx-version-min=13.0 -O2 -Wall -Wextra Sources/NativeIPC.c Sources/VendorNotice.c Sources/EAPTrace.c Sources/AppleEAP.c Sources/PrivilegeBroker.c Sources/VendorHelper.c -framework CoreFoundation -liconv -lpcap -o "$app/Contents/Resources/inode-helper"
 
-xcrun swiftc -swift-version 5 -O -target "${arch}-apple-macos13.0" -parse-as-library Sources/AccountFormat.swift Sources/LoginItem.swift Sources/WindowCloseBehavior.swift Sources/App.swift -o "$app/Contents/MacOS/InodeMac"
+xcrun swiftc -swift-version 5 -O -target "${arch}-apple-macos13.0" -parse-as-library Sources/AccountFormat.swift Sources/CredentialStore.swift Sources/LoginItem.swift Sources/PrivilegeBroker.swift Sources/WindowCloseBehavior.swift Sources/App.swift -o "$app/Contents/MacOS/InodeMac"
 cp assets/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 cp LICENSE "$app/Contents/Resources/PROJECT-LICENSE.txt"
 cp THIRD_PARTY.md "$app/Contents/Resources/THIRD_PARTY.md"
@@ -41,8 +41,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>InodeMac</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.6.1</string>
-<key>CFBundleVersion</key><string>21</string>
+<key>CFBundleShortVersionString</key><string>0.7.0</string>
+<key>CFBundleVersion</key><string>22</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>

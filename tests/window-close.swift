@@ -44,6 +44,10 @@ import SwiftUI
             precondition(hostedWindow.delegate is MinimizeOnCloseCoordinator,
                          "The SwiftUI window attachment must install the close handler")
             hostedWindow.performClose(nil)
+            let deadline = Date().addingTimeInterval(1)
+            while !hostedWindow.isMiniaturized && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
             precondition(hostedWindow.isMiniaturized, "The hosted window must minimize")
             hostedWindow.deminiaturize(nil)
             hostedWindow.close()

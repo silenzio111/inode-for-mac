@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import Security
 
 struct Adapter: Identifiable, Hashable {
     var id: String
@@ -29,35 +28,11 @@ func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of
 func appleQuote(_ value: String) -> String {
     "\"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\n", with: "\\n") + "\""
 }
-enum PasswordStore {
-    static let service = "local.swufe.inode-mac"
-    static func query(_ account: String) -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
-    }
-    static func load(_ account: String) -> String {
-        guard !account.isEmpty else { return "" }
-        var q = query(account); q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &result) == errSecSuccess, let d = result as? Data else { return "" }
-        return String(data: d, encoding: .utf8) ?? ""
-    }
-    static func save(_ account: String, _ password: String) -> Bool {
-        let q = query(account)
-        let attributes: [String: Any] = [kSecValueData as String: Data(password.utf8)]
-        let update = SecItemUpdate(q as CFDictionary, attributes as CFDictionary)
-        if update == errSecSuccess { return true }
-        if update != errSecItemNotFound { return false }
-        var new = q; new[kSecValueData as String] = Data(password.utf8)
-        new[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        return SecItemAdd(new as CFDictionary, nil) == errSecSuccess
-    }
-    static func delete(_ account: String) { SecItemDelete(query(account) as CFDictionary) }
-}
 @MainActor final class Connection: ObservableObject {
     @Published var showLog = false
     @Published var adapters: [Adapter] = []
     @Published var selected = UserDefaults.standard.string(forKey: "adapter") ?? "en8"
-    @Published var username = UserDefaults.standard.string(forKey: "username") ?? ""
+    @Published var username = ""
     @Published var password = ""
     @Published var realm = UserDefaults.standard.string(forKey: "realm") ?? "移动"
     @Published var authMode = UserDefaults.standard.string(forKey: "authMode") ?? "vendor"
@@ -90,11 +65,11 @@ enum PasswordStore {
     private var retryAttempt = 0
     private var retryDeadline: Date?
     private var userRequestedStop = false
+    private var brokerDirectory: URL?
     var account: String {
         username.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     var submittedAccount: String { campusSubmittedAccount(account, realm: realm) }
-    var credentialKey: String { account + "|service:" + realm.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var adapter: Adapter? { adapters.first { $0.id == selected } }
     var hasIP: Bool { authenticated && !(adapter?.ip ?? "").isEmpty }
@@ -117,8 +92,28 @@ enum PasswordStore {
     }
     init() {
         retryLimit = min(10, max(0, retryLimit))
+        let oldAccount = UserDefaults.standard.string(forKey: "username")
+        UserDefaults.standard.removeObject(forKey: "username")
+        UserDefaults.standard.synchronize()
         #if !INODE_TESTING
-        password = PasswordStore.load(credentialKey)
+        do {
+            if let saved = try CredentialStore.load() {
+                username = saved.account
+                realm = saved.realm
+                password = saved.password
+            } else {
+                username = oldAccount ?? ""
+                if remember && !username.isEmpty {
+                    preferencesMessage = "升级后请重新输入密码，连接一次即可保存到本机。"
+                }
+            }
+        } catch {
+            username = oldAccount ?? ""
+            preferencesMessage = "本机保存的账号密码无法读取，请重新输入并保存。"
+            addLog("本机加密凭据读取失败")
+        }
+        #else
+        username = oldAccount ?? ""
         #endif
         refresh()
         startupPending = autoConnect && !account.isEmpty && !password.isEmpty &&
@@ -159,7 +154,11 @@ enum PasswordStore {
             disconnect(); error = true; message = "网线已断开，请重新连接。"
         }
     }
-    func loadPassword() { password = PasswordStore.load(credentialKey) }
+    func loadPassword() {
+        guard let saved = try? CredentialStore.load(),
+              saved.account == account, saved.realm == realm else { password = ""; return }
+        password = saved.password
+    }
     func tick() {
         if Date().timeIntervalSince(lastScan) >= 2 { refresh() }
         if startupPending && adapter?.active == true {
@@ -195,7 +194,8 @@ enum PasswordStore {
             }
             linesRead = lines.count
         }
-        if busy && !authorizing && lines.isEmpty && Date().timeIntervalSince(launchTime) > 15 {
+        let startupTimeout: TimeInterval = authMode == "vendor" ? 60 : 15
+        if busy && !authorizing && lines.isEmpty && Date().timeIntervalSince(launchTime) > startupTimeout {
             disconnect(); busy = false; terminated = true; error = true; message = "认证组件未启动，请查看日志或重试管理员授权。"
         }
         if terminated {
@@ -259,14 +259,23 @@ enum PasswordStore {
         guard !account.isEmpty, !password.isEmpty, service.utf8.count <= 64, values.allSatisfy({ !$0.contains("\n") && !$0.contains("\r") && !$0.contains("\0") && $0.utf8.count <= 240 }) else {
             error = true; message = "请填写有效的账号和密码。"; return
         }
-        UserDefaults.standard.set(username, forKey: "username"); UserDefaults.standard.set(realm, forKey: "realm")
+        UserDefaults.standard.set(realm, forKey: "realm")
         UserDefaults.standard.set(selected, forKey: "adapter"); UserDefaults.standard.set(remember, forKey: "remember")
         UserDefaults.standard.set(xorMode, forKey: "xorMode")
         UserDefaults.standard.set(serviceGBK, forKey: "serviceGBK")
         UserDefaults.standard.set(authMode, forKey: "authMode")
         if remember {
-            if !PasswordStore.save(credentialKey, password) { addLog("密码未能保存到钥匙串，本次连接仍可继续") }
-        } else { PasswordStore.delete(credentialKey) }
+            do {
+                try CredentialStore.save(SavedCredentials(account: account, realm: realm, password: password))
+                preferencesMessage = ""
+            } catch {
+                preferencesMessage = "账号密码未能保存到本机；本次连接仍可继续。"
+                addLog("本机加密凭据保存失败")
+            }
+        } else {
+            do { try CredentialStore.delete() }
+            catch { addLog("清除本机加密凭据失败") }
+        }
         cleanup()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("inode-" + UUID().uuidString)
         do {
@@ -277,11 +286,27 @@ enum PasswordStore {
             FileManager.default.createFile(atPath: dir.appendingPathComponent("events").path, contents: Data(), attributes: [.posixPermissions: 0o600])
             session = dir; linesRead = 0; busy = true; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; checkingInternet = false; error = false; terminated = false; authorizing = true; attemptedInternet = false
             let usePEAP = authMode == "peap"
-            launchTime = Date(); message = usePEAP ? "正在启动 macOS 有线 PEAP 认证…" : "请在 macOS 弹窗中允许有线认证。"; addLog("准备启动有线认证组件（\(selected)）")
+            let reuseBroker = !usePEAP && brokerDirectory.map { PrivilegeBroker.isRunning(in: $0) } == true
+            launchTime = Date()
+            message = usePEAP ? "正在启动 macOS 有线 PEAP 认证…" :
+                (reuseBroker ? "正在复用已授权的认证组件…" : "请在 macOS 弹窗中允许有线认证。")
+            addLog("准备启动有线认证组件（\(selected)）")
             addLog(submittedAccount != account ? "移动账号按学校 Mac 教程补全 @cm；密码未改动" : "使用填写的账号格式；密码未改动")
             guard let helper = Bundle.main.url(forResource: "inode-helper", withExtension: nil) else { throw CocoaError(.fileNoSuchFile) }
-            let command = shellQuote(helper.path) + " --session " + shellQuote(dir.path) + " >/dev/null 2>&1 &"
-            let script = "do shell script " + appleQuote(command) + " with administrator privileges"
+            if reuseBroker, let brokerDirectory {
+                try PrivilegeBroker.enqueue(dir, in: brokerDirectory)
+                authorizing = false
+                addLog("复用本次运行已授权的认证组件，无需再次请求管理员授权")
+                return
+            }
+            let broker: URL?
+            if usePEAP { broker = nil }
+            else {
+                let created = try PrivilegeBroker.createDirectory()
+                try PrivilegeBroker.enqueue(dir, in: created)
+                brokerDirectory = created
+                broker = created
+            }
             Task {
                 let result = await Task.detached { () -> (Int32, String) in
                     if usePEAP {
@@ -290,14 +315,23 @@ enum PasswordStore {
                         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
                         do { try process.run(); return (0, "") } catch { return (-1, "") }
                     }
+                    guard let broker else { return (-1, "") }
+                    let command = shellQuote(helper.path) + " --broker " + shellQuote(broker.path) +
+                        " " + String(ProcessInfo.processInfo.processIdentifier) + " </dev/null >/dev/null 2>&1 &"
+                    let script = "do shell script " + appleQuote(command) + " with administrator privileges"
                     return run("/usr/bin/osascript", ["-e", script])
                 }.value
                 guard session == dir else { return }
                 authorizing = false
                 NotificationCenter.default.post(name: Notification.Name("inodeAuthorizationFinished"), object: nil)
                 if result.0 != 0 {
+                    if brokerDirectory == broker { brokerDirectory = nil }
                     busy = false; error = true; message = usePEAP ? "PEAP 认证组件启动失败。" : "管理员授权取消或启动失败。"; addLog(message); cleanup()
-                } else { launchTime = Date(); message = "正在启动有线认证…" }
+                } else {
+                    launchTime = Date()
+                    message = "正在启动有线认证…"
+                    if !usePEAP { addLog("已启动本次运行可复用的授权组件") }
+                }
             }
         } catch { busy = false; self.error = true; message = "无法启动认证组件：\(error.localizedDescription)"; cleanup() }
     }
@@ -309,6 +343,10 @@ enum PasswordStore {
         if let session { FileManager.default.createFile(atPath: session.appendingPathComponent("stop").path, contents: Data(), attributes: [.posixPermissions: 0o600]) }
         authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; message = hadSession ? "正在断开有线认证…" : "已取消自动重试。"
         if session == nil { busy = false }
+    }
+    func shutdownBroker() {
+        if let brokerDirectory { PrivilegeBroker.stop(in: brokerDirectory) }
+        brokerDirectory = nil
     }
     private func cleanup() {
         if let session {
@@ -327,18 +365,35 @@ enum PasswordStore {
         busy = true
     }
     #endif
-    func forgetPassword() { PasswordStore.delete(credentialKey); password = ""; remember = false; UserDefaults.standard.set(false, forKey: "remember"); addLog("已移除此账号的钥匙串密码") }
+    func forgetPassword() {
+        do {
+            try CredentialStore.delete()
+            username = ""; password = ""; remember = false
+            UserDefaults.standard.set(false, forKey: "remember")
+            preferencesMessage = ""
+            addLog("已清除本机保存的账号与密码")
+        } catch {
+            preferencesMessage = "清除本机账号密码失败：\(error.localizedDescription)"
+        }
+    }
     func setRemember(_ enabled: Bool) {
         remember = enabled
         UserDefaults.standard.set(enabled, forKey: "remember")
         preferencesMessage = ""
         if enabled {
-            if !account.isEmpty && !password.isEmpty && !PasswordStore.save(credentialKey, password) {
-                preferencesMessage = "密码未能保存到钥匙串，请检查系统钥匙串权限。"
+            if !account.isEmpty && !password.isEmpty {
+                do { try CredentialStore.save(SavedCredentials(account: account, realm: realm, password: password)) }
+                catch { preferencesMessage = "账号密码未能保存到本机：\(error.localizedDescription)" }
             }
         } else {
-            PasswordStore.delete(credentialKey)
-            startupPending = false
+            do {
+                try CredentialStore.delete()
+                startupPending = false
+            } catch {
+                remember = true
+                UserDefaults.standard.set(true, forKey: "remember")
+                preferencesMessage = "清除本机账号密码失败：\(error.localizedDescription)"
+            }
         }
     }
     func setAutoConnect(_ enabled: Bool) {
@@ -402,7 +457,7 @@ struct ContentView: View {
                     Text(model.preferencesMessage).font(.caption2).foregroundStyle(.orange)
                 }
                 if model.autoConnect && !model.remember {
-                    Text("自动连接需要先保存密码并成功连接一次。").font(.caption2).foregroundStyle(.secondary)
+                    Text("自动连接需要先保存账号密码并连接一次。").font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
             }.padding(26).frame(width: 225).frame(maxHeight: .infinity).background(Color(nsColor: .controlBackgroundColor))
@@ -429,9 +484,9 @@ struct ContentView: View {
                             field("密码") { SecureField("校园网密码", text: $model.password) }
                         }
                         HStack {
-                            Toggle("保存到 macOS 钥匙串", isOn: Binding(get: { model.remember }, set: { model.setRemember($0) })).toggleStyle(.checkbox)
+                            Toggle("本机加密保存账号与密码", isOn: Binding(get: { model.remember }, set: { model.setRemember($0) })).toggleStyle(.checkbox)
                             Spacer()
-                            Button("清除已保存密码") { model.forgetPassword() }.buttonStyle(.link)
+                            Button("清除已保存账号密码") { model.forgetPassword() }.buttonStyle(.link)
                         }.font(.caption)
                         HStack {
                             Picker("认证方式", selection: $model.authMode) {
@@ -474,19 +529,15 @@ struct ContentView: View {
                     Divider()
                     info("网络连通性", "globe", model.internetDetail)
                 }.padding(22).overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.1)))
+                if model.busy || model.retryScheduled {
+                    actionBar.padding(.top, 8)
+                }
                     }.padding(.horizontal, 30).padding(.top, 30).padding(.bottom, 18)
                 }
-                Divider()
-                HStack {
-                    Button { model.showLog = true } label: { Label("连接日志", systemImage: "list.bullet.rectangle") }
-                    Spacer()
-                    Button { model.manualRefresh() } label: { Label("刷新状态", systemImage: "arrow.clockwise") }.disabled(model.checkingInternet && model.authenticated)
-                    if model.busy || model.retryScheduled {
-                        Button(role: .destructive) { model.disconnect() } label: { Label(model.retryScheduled ? "取消重试" : "断开连接", systemImage: "xmark") }
-                    } else {
-                        Button { model.connect() } label: { Label("连接校园网", systemImage: "bolt.fill") }.buttonStyle(.borderedProminent).tint(green)
-                    }
-                }.controlSize(.large).padding(.horizontal, 30).padding(.top, 16).padding(.bottom, 24)
+                if !model.busy && !model.retryScheduled {
+                    Divider()
+                    actionBar.padding(.horizontal, 30).padding(.top, 16).padding(.bottom, 24)
+                }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }.frame(minWidth: 920, minHeight: 770).background(Color(nsColor: .windowBackgroundColor))
             .background(MinimizeOnClose().frame(width: 0, height: 0))
@@ -498,6 +549,18 @@ struct ContentView: View {
                     Button("复制日志") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(model.logs.joined(separator: "\n"), forType: .string) }
                 }.padding(24).frame(width: 690, height: 420)
             }
+    }
+    var actionBar: some View {
+        HStack {
+                    Button { model.showLog = true } label: { Label("连接日志", systemImage: "list.bullet.rectangle") }
+                    Spacer()
+                    Button { model.manualRefresh() } label: { Label("刷新状态", systemImage: "arrow.clockwise") }.disabled(model.checkingInternet && model.authenticated)
+                    if model.busy || model.retryScheduled {
+                        Button(role: .destructive) { model.disconnect() } label: { Label(model.retryScheduled ? "取消重试" : "断开连接", systemImage: "xmark") }
+                    } else {
+                        Button { model.connect() } label: { Label("连接校园网", systemImage: "bolt.fill") }.buttonStyle(.borderedProminent).tint(green)
+                    }
+        }.controlSize(.large)
     }
     func step(_ n: Int, _ title: String, _ detail: String, _ done: Bool) -> some View {
         HStack(alignment: .top, spacing: 13) {
@@ -575,7 +638,10 @@ struct ContentView: View {
         window.orderFront(nil)
     }
 
-    func applicationWillTerminate(_ notification: Notification) { model?.disconnect() }
+    func applicationWillTerminate(_ notification: Notification) {
+        model?.disconnect()
+        model?.shutdownBroker()
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { openMainWindow() }

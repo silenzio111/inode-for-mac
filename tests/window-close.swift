@@ -2,8 +2,6 @@ import AppKit
 import SwiftUI
 
 @MainActor private final class OriginalDelegate: NSObject, NSWindowDelegate {
-    var minimized = false
-    func windowDidMiniaturize(_ notification: Notification) { minimized = true }
 }
 
 @main struct WindowCloseTest {
@@ -18,16 +16,25 @@ import SwiftUI
         window.isReleasedWhenClosed = false
         let original = OriginalDelegate()
         window.delegate = original
-        let coordinator = MinimizeOnCloseCoordinator()
+        var closeCount = 0
+        let coordinator = HideOnCloseCoordinator { closeCount += 1 }
         coordinator.install(on: window)
         window.orderFront(nil)
         window.performClose(nil)
-        precondition(window.isMiniaturized, "Close must minimize the window")
-        precondition(window.delegate === coordinator, "Minimized window must retain its delegate")
-        precondition(original.minimized, "Other delegate callbacks must still reach the original delegate")
-        window.deminiaturize(nil)
+        precondition(closeCount == 1, "Close must notify the app that the window was hidden")
+        precondition(!window.isVisible, "Close must hide the window")
+        precondition(!window.isMiniaturized, "Close must not leave a minimized window in the Dock")
+        precondition(window.delegate === coordinator, "Hidden window must retain its delegate")
         window.makeKeyAndOrderFront(nil)
-        precondition(!window.isMiniaturized, "Reopening must restore the window")
+        precondition(window.isVisible, "The menu bar can reopen the hidden window")
+        app.activate(ignoringOtherApps: true)
+        window.miniaturize(nil)
+        let minimizeDeadline = Date().addingTimeInterval(1)
+        while !window.isMiniaturized && Date() < minimizeDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        precondition(window.isMiniaturized, "The yellow button must still minimize the window")
+        window.deminiaturize(nil)
         coordinator.uninstall()
         precondition(window.delegate === original, "Normal window delegate must be restored")
         window.close()
@@ -35,22 +42,22 @@ import SwiftUI
                                     styleMask: [.titled, .closable, .miniaturizable],
                                     backing: .buffered, defer: false)
         hostedWindow.isReleasedWhenClosed = false
+        var hostedCloseCount = 0
         hostedWindow.contentView = NSHostingView(rootView: Text("window test")
             .frame(width: 220, height: 140)
-            .background(MinimizeOnClose().frame(width: 0, height: 0)))
+            .background(HideOnClose(onClose: { hostedCloseCount += 1 }).frame(width: 0, height: 0)))
         hostedWindow.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
         var hostedChecked = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            precondition(hostedWindow.delegate is MinimizeOnCloseCoordinator,
+            precondition(hostedWindow.delegate is HideOnCloseCoordinator,
                          "The SwiftUI window attachment must install the close handler")
             hostedWindow.performClose(nil)
-            let deadline = Date().addingTimeInterval(1)
-            while !hostedWindow.isMiniaturized && Date() < deadline {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-            }
-            precondition(hostedWindow.isMiniaturized, "The hosted window must minimize")
-            hostedWindow.deminiaturize(nil)
+            precondition(hostedCloseCount == 1, "The hosted window must report a red close")
+            precondition(!hostedWindow.isVisible, "The hosted window must hide")
+            precondition(!hostedWindow.isMiniaturized, "The hosted window must not minimize")
+            hostedWindow.makeKeyAndOrderFront(nil)
+            precondition(hostedWindow.isVisible, "The hosted window must reopen")
             hostedWindow.close()
             hostedChecked = true
         }
@@ -59,6 +66,6 @@ import SwiftUI
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         }
         precondition(hostedChecked, "The hosted window check must finish promptly")
-        print("Closing minimizes the window without destroying it")
+        print("Red close hides the window; yellow minimize remains available")
     }
 }

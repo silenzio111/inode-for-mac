@@ -439,6 +439,7 @@ private enum WindowLayout {
 }
 struct ContentView: View {
     @ObservedObject var model: Connection
+    var onWindowClosed: () -> Void
     private var compact: Bool { model.busy || model.retryScheduled || model.authenticated }
     var body: some View {
         HStack(spacing: 0) {
@@ -551,7 +552,7 @@ struct ContentView: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }.frame(minWidth: 920, minHeight: compact ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight)
             .background(Color(nsColor: .windowBackgroundColor))
-            .background(MinimizeOnClose().frame(width: 0, height: 0))
+            .background(HideOnClose(onClose: onWindowClosed).frame(width: 0, height: 0))
             .sheet(isPresented: $model.showLog) {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack { Text("连接日志").font(.title2.bold()); Spacer(); Button("关闭") { model.showLog = false } }
@@ -592,11 +593,12 @@ struct ContentView: View {
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
     private var windowSizeObservation: AnyCancellable?
+    private var mainWindowHiddenByUser = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let connection = Connection()
         model = connection
-        NSApp.setActivationPolicy(connection.showDockIcon ? .regular : .accessory)
+        NSApp.setActivationPolicy(.accessory)
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "network", accessibilityDescription: "iNode for Mac")
@@ -642,11 +644,16 @@ struct ContentView: View {
             let minimumContentHeight = compact ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight
             window.minSize = NSSize(width: 920, height: frameHeight(for: minimumContentHeight, in: window))
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: ContentView(model: model))
+            window.contentView = NSHostingView(rootView: ContentView(model: model, onWindowClosed: { [weak self] in
+                self?.mainWindowHiddenByUser = true
+                NSApp.setActivationPolicy(.accessory)
+            }))
             window.center()
             mainWindow = window
         }
         if mainWindow?.isMiniaturized == true { mainWindow?.deminiaturize(nil) }
+        mainWindowHiddenByUser = false
+        NSApp.setActivationPolicy(model.showDockIcon ? .regular : .accessory)
         mainWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -679,7 +686,7 @@ struct ContentView: View {
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func restoreAfterAuthorization() {
-        guard let window = mainWindow, !window.isMiniaturized, !window.isVisible else { return }
+        guard let window = mainWindow, !mainWindowHiddenByUser, !window.isMiniaturized, !window.isVisible else { return }
         NSApp.unhideWithoutActivation()
         window.orderFront(nil)
     }

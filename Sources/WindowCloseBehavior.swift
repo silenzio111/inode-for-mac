@@ -1,9 +1,12 @@
 import AppKit
 import SwiftUI
 
-@MainActor final class MinimizeOnCloseCoordinator: NSObject, NSWindowDelegate {
+@MainActor final class HideOnCloseCoordinator: NSObject, NSWindowDelegate {
     private weak var window: NSWindow?
     private weak var originalDelegate: (any NSWindowDelegate)?
+    var onClose: () -> Void
+
+    init(onClose: @escaping () -> Void) { self.onClose = onClose }
 
     func install(on window: NSWindow) {
         if self.window !== window, let oldWindow = self.window, oldWindow.delegate === self {
@@ -16,7 +19,8 @@ import SwiftUI
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        sender.miniaturize(nil)
+        sender.orderOut(nil)
+        onClose()
         return false
     }
 
@@ -49,8 +53,10 @@ private final class WindowAttachmentView: NSView {
     }
 }
 
-struct MinimizeOnClose: NSViewRepresentable {
-    func makeCoordinator() -> MinimizeOnCloseCoordinator { MinimizeOnCloseCoordinator() }
+struct HideOnClose: NSViewRepresentable {
+    var onClose: () -> Void
+
+    func makeCoordinator() -> HideOnCloseCoordinator { HideOnCloseCoordinator(onClose: onClose) }
 
     func makeNSView(context: Context) -> NSView {
         let view = WindowAttachmentView()
@@ -59,10 +65,11 @@ struct MinimizeOnClose: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onClose = onClose
         if let window = nsView.window { context.coordinator.install(on: window) }
     }
 
-    static func dismantleNSView(_ nsView: NSView, coordinator: MinimizeOnCloseCoordinator) {
+    static func dismantleNSView(_ nsView: NSView, coordinator: HideOnCloseCoordinator) {
         coordinator.uninstall()
     }
 }

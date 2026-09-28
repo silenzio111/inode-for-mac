@@ -12,7 +12,7 @@
 
 ## 下载与安装
 
-从 [Releases](https://github.com/silenzio111/inode-for-mac/releases) 下载对应芯片的 ZIP：`arm64` 用于 M 系列芯片，`x86_64` 用于 Intel。解压后可将 `iNode for Mac.app` 移至“应用程序”。两个包分别包含对应架构的应用和辅助程序，并附带普通认证所需的 H3C Mac PC 7.3 (E0585) 原厂引擎及配套库；该引擎本身是 x86_64，因此 M 系列芯片使用普通认证还需要 [Rosetta 2](https://support.apple.com/102527)。
+从 [Releases](https://github.com/silenzio111/inode-for-mac/releases) 下载对应芯片的 ZIP：`arm64` 用于 M 系列芯片，`x86_64` 用于 Intel。解压后先将 `iNode for Mac.app` 移至“应用程序”，再打开。两个包分别包含对应架构的应用和辅助程序，并附带普通认证所需的 H3C Mac PC 7.3 (E0585) 原厂引擎及配套库；该引擎本身是 x86_64，因此 M 系列芯片使用普通认证还需要 [Rosetta 2](https://support.apple.com/102527)。
 
 H3C 组件来自 [`helson-lin/iNode_Client_Sequoia`](https://github.com/helson-lin/iNode_Client_Sequoia) 的固定提交 `dd9ac3f26815c262a67a3e434bfaa2e6f178d510`。本项目的 GPL 许可仅覆盖自编源码，**不将 H3C 原厂组件声明为开源**；上游封装项目的 MIT 声明也不能替代原厂组件的权利归属。详情见 [THIRD_PARTY.md](THIRD_PARTY.md)。普通认证在每次启动应用后的首次连接会请求管理员授权；保持应用运行时，手动重连和自动重试复用已授权后台组件，不再重复弹窗。完全退出应用后再启动，需要重新授权。公开包未经 Apple Developer ID 公证，首次打开可能需到“系统设置 → 隐私与安全性”允许。
 

@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
-version="0.7.2"
+version="0.7.3"
 mkdir -p dist/release
 python3 - <<'VERIFY'
 import json
@@ -21,14 +21,15 @@ for arch in arm64 x86_64; do
     cp LICENSE THIRD_PARTY.md "$stage/"
     cp licenses/sequoia-MIT.txt "$stage/UPSTREAM-MIT-LICENSE.txt"
     cat > "$stage/README.txt" <<'NOTES'
-iNode for Mac 0.7.2
+iNode for Mac 0.7.3
 
+本版修复原厂认证控制接口偶发未就绪：双向管道最多等待 40 秒，并在失败时记录具体阶段。
 此应用包含普通 iNode 认证所需的 H3C Mac E0585 引擎和配套库，来源于
 helson-lin/iNode_Client_Sequoia 固定提交 dd9ac3f26815c262a67a3e434bfaa2e6f178d510。
 应用自身源码按 GPL-3.0-or-later 发布；第三方组件有独立权利归属，
 请阅读 THIRD_PARTY.md。上游封装项目的 MIT 许可见 UPSTREAM-MIT-LICENSE.txt。
 Apple Silicon 使用普通认证还需要 Rosetta 2。
-解压后打开 iNode for Mac.app；普通认证每次启动后的首次连接会请求管理员授权。
+解压后先将 iNode for Mac.app 移至“应用程序”目录再打开；普通认证每次启动后的首次连接会请求管理员授权。
 保持应用运行时，手动重连与自动重试复用已授权组件，不再重复弹窗。
 认证通过后每约 2 秒检查有线 IP；取得地址后再测试 Google 和百度。
 默认只在菜单栏显示图标；点击图标可打开主界面或退出。红色关闭按钮只最小化窗口。

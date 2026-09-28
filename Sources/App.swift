@@ -89,7 +89,16 @@ enum PasswordStore {
 
     var adapter: Adapter? { adapters.first { $0.id == selected } }
     var hasIP: Bool { !(adapter?.ip ?? "").isEmpty }
+    var headline: String {
+        if internet { return "已连接" }
+        if error { return "需要处理" }
+        if authenticated && !hasIP { return "正在等待 IP 地址" }
+        if authenticated && checkingInternet { return "正在检测网络连接" }
+        if authenticated { return "认证已通过" }
+        return busy ? "正在连接" : "连接校园网"
+    }
     var internetDetail: String {
+        if authenticated && !hasIP { return "等待有线 IP 地址" }
         if checkingInternet { return "正在测试 Google 和百度" }
         if !attemptedInternet { return "尚未测试 Google 和百度" }
         return "Google：\(googleReachable == true ? "可访问" : "未通过") · 百度：\(baiduReachable == true ? "可访问" : "未通过")"
@@ -132,7 +141,7 @@ enum PasswordStore {
     }
     func loadPassword() { password = PasswordStore.load(credentialKey) }
     func tick() {
-        if Date().timeIntervalSince(lastScan) > 4 { refresh() }
+        if Date().timeIntervalSince(lastScan) >= 4 { refresh() }
         guard let session else { return }
         let text = (try? String(contentsOf: session.appendingPathComponent("events"), encoding: .utf8)) ?? ""
         let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
@@ -154,17 +163,28 @@ enum PasswordStore {
             disconnect(); busy = false; terminated = true; error = true; message = "认证组件未启动，请查看日志或重试管理员授权。"
         }
         if terminated { cleanup(); return }
+        if authenticated && !hasIP { waitForAddress() }
         if authenticated && hasIP && !internet && !checkingInternet && !attemptedInternet { checkInternet() }
-        if authenticated && !hasIP { message = "认证已通过，正在等待有线 IPv4 地址。" }
+    }
+    private func waitForAddress() {
+        internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false
+        message = "正在等待学校服务器分配 IP 地址…"
     }
     func checkInternet() {
-        guard let current = session else { return }
+        guard let current = session, authenticated, hasIP else { return }
+        let testedAddress = adapter?.ip
         checkingInternet = true; attemptedInternet = true
+        message = "已取得有线 IP 地址，正在检测网络连通性…"
         Task {
             let result = await Task.detached {
                 checkGoogleAndBaidu()
             }.value
             guard session == current, authenticated else { checkingInternet = false; return }
+            guard hasIP, adapter?.ip == testedAddress else {
+                checkingInternet = false; attemptedInternet = false
+                if !hasIP { waitForAddress() }
+                return
+            }
             googleReachable = result.google; baiduReachable = result.baidu
             internet = result.google || result.baidu
             checkingInternet = false
@@ -175,7 +195,9 @@ enum PasswordStore {
     }
     func manualRefresh() {
         refresh()
-        if authenticated && !checkingInternet { attemptedInternet = false; internet = false; googleReachable = nil; baiduReachable = nil; checkInternet() }
+        guard authenticated else { return }
+        guard hasIP else { waitForAddress(); return }
+        if !checkingInternet { attemptedInternet = false; internet = false; googleReachable = nil; baiduReachable = nil; checkInternet() }
     }
     func connect() {
         guard !busy else { return }
@@ -266,7 +288,7 @@ struct ContentView: View {
                     Image(systemName: model.internet ? "checkmark.circle.fill" : (model.error ? "exclamationmark.circle.fill" : "cable.connector"))
                         .font(.system(size: 52, weight: .light)).foregroundStyle(model.error ? .orange : green)
                     VStack(alignment: .leading, spacing: 9) {
-                        Text(model.internet ? "已连接" : (model.authenticated ? "认证已通过" : (model.error ? "需要处理" : (model.busy ? "正在连接" : "连接校园网"))))
+                        Text(model.headline)
                             .font(.system(size: 30, weight: .bold))
                         Text(model.message).font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }

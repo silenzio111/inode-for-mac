@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
-version="0.5.1"
+version="0.5.2"
 mkdir -p dist/release
 python3 - <<'VERIFY'
 import json
@@ -21,7 +21,7 @@ for arch in arm64 x86_64; do
     cp LICENSE THIRD_PARTY.md "$stage/"
     cp licenses/sequoia-MIT.txt "$stage/UPSTREAM-MIT-LICENSE.txt"
     cat > "$stage/README.txt" <<'NOTES'
-iNode for Mac 0.5.1
+iNode for Mac 0.5.2
 
 此应用包含普通 iNode 认证所需的 H3C Mac E0585 引擎和配套库，来源于
 helson-lin/iNode_Client_Sequoia 固定提交 dd9ac3f26815c262a67a3e434bfaa2e6f178d510。
@@ -29,6 +29,7 @@ helson-lin/iNode_Client_Sequoia 固定提交 dd9ac3f26815c262a67a3e434bfaa2e6f17
 请阅读 THIRD_PARTY.md。上游封装项目的 MIT 许可见 UPSTREAM-MIT-LICENSE.txt。
 Apple Silicon 使用普通认证还需要 Rosetta 2。
 解压后打开 iNode for Mac.app；普通认证首次连接会请求管理员授权。
+认证通过后每约 4 秒检查有线 IP；取得地址后再测试 Google 和百度。
 发行包未经 Apple Developer ID 公证，首次打开可能需要在“隐私与安全性”中允许。
 源码、许可和详细说明：https://github.com/silenzio111/inode-for-mac
 NOTES

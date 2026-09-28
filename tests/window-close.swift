@@ -10,9 +10,11 @@ import SwiftUI
     @MainActor static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 160),
-                              styleMask: [.titled, .closable, .miniaturizable],
-                              backing: .buffered, defer: false)
+        let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 240, height: 160),
+                             styleMask: [.titled, .closable, .miniaturizable],
+                             backing: .buffered, defer: false)
+        window.hidesOnDeactivate = false
+        window.level = .normal
         window.isReleasedWhenClosed = false
         let original = OriginalDelegate()
         window.delegate = original

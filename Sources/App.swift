@@ -63,6 +63,7 @@ enum PasswordStore {
     @Published var authMode = UserDefaults.standard.string(forKey: "authMode") ?? "vendor"
     @Published var remember = UserDefaults.standard.object(forKey: "remember") as? Bool ?? true
     @Published var autoConnect = UserDefaults.standard.object(forKey: "autoConnect") as? Bool ?? true
+    @Published var retryLimit = UserDefaults.standard.object(forKey: "retryLimit") as? Int ?? 3
     @Published var launchAtLogin = LoginItem.isEnabled()
     @Published var showDockIcon = UserDefaults.standard.bool(forKey: "showDockIcon")
     @Published var preferencesMessage = ""
@@ -86,6 +87,9 @@ enum PasswordStore {
     private var authorizing = false
     private var attemptedInternet = false
     private var startupPending = false
+    private var retryAttempt = 0
+    private var retryDeadline: Date?
+    private var userRequestedStop = false
     var account: String {
         username.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -93,9 +97,11 @@ enum PasswordStore {
     var credentialKey: String { account + "|service:" + realm.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var adapter: Adapter? { adapters.first { $0.id == selected } }
-    var hasIP: Bool { !(adapter?.ip ?? "").isEmpty }
+    var hasIP: Bool { authenticated && !(adapter?.ip ?? "").isEmpty }
+    var retryScheduled: Bool { retryDeadline != nil }
     var headline: String {
         if internet { return "已连接" }
+        if retryScheduled { return "正在自动重试" }
         if error { return "需要处理" }
         if authenticated && !hasIP { return "正在等待学校服务器分配 IP" }
         if authenticated && checkingInternet { return "正在检测网络连接" }
@@ -105,12 +111,15 @@ enum PasswordStore {
     }
     var internetDetail: String {
         if authenticated && !hasIP { return "等待有线 IP 地址" }
-        if checkingInternet { return "正在测试 Google 和百度" }
-        if !attemptedInternet { return "尚未测试 Google 和百度" }
-        return "Google：\(googleReachable == true ? "可访问" : "未通过") · 百度：\(baiduReachable == true ? "可访问" : "未通过")"
+        if checkingInternet { return "正在检测网络连接" }
+        if !attemptedInternet { return "尚未检测网络连接" }
+        return internet ? "网络连接正常" : "网络连接测试未通过"
     }
     init() {
+        retryLimit = min(10, max(0, retryLimit))
+        #if !INODE_TESTING
         password = PasswordStore.load(credentialKey)
+        #endif
         refresh()
         startupPending = autoConnect && !account.isEmpty && !password.isEmpty &&
             ProcessInfo.processInfo.environment["INODE_DISABLE_AUTO_CONNECT"] != "1"
@@ -158,6 +167,17 @@ enum PasswordStore {
             addLog("使用上次保存的配置自动连接")
             connect()
         }
+        if let retryDeadline, session == nil, Date() >= retryDeadline {
+            if adapter?.active == true {
+                self.retryDeadline = nil
+                retryAttempt += 1
+                addLog("第 \(retryAttempt)/\(retryLimit) 次自动重试")
+                beginConnection()
+            } else {
+                self.retryDeadline = Date().addingTimeInterval(2)
+                message = "等待网线接入后自动重试…"
+            }
+        }
         guard let session else { return }
         let text = (try? String(contentsOf: session.appendingPathComponent("events"), encoding: .utf8)) ?? ""
         let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
@@ -166,7 +186,7 @@ enum PasswordStore {
                 let parts = line.components(separatedBy: "\t"); guard parts.count >= 2 else { continue }
                 let state = parts[0], detail = parts.dropFirst().joined(separator: "\t")
                 addLog(detail)
-                if state == "authenticated" { authenticated = true; error = false; message = detail }
+                if state == "authenticated" { authenticated = true; retryAttempt = 0; error = false; message = detail }
                 else if state == "error" || state == "expired" { error = true; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; message = detail }
                 else if state == "stopped" {
                     busy = false; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; terminated = true
@@ -178,7 +198,16 @@ enum PasswordStore {
         if busy && !authorizing && lines.isEmpty && Date().timeIntervalSince(launchTime) > 15 {
             disconnect(); busy = false; terminated = true; error = true; message = "认证组件未启动，请查看日志或重试管理员授权。"
         }
-        if terminated { cleanup(); return }
+        if terminated {
+            cleanup()
+            if !userRequestedStop && retryAttempt < retryLimit {
+                retryDeadline = Date().addingTimeInterval(3)
+                error = false
+                message = "即将自动重试（第 \(retryAttempt + 1)/\(retryLimit) 次）。"
+                addLog(message)
+            }
+            return
+        }
         if authenticated && !hasIP { waitForAddress() }
         if authenticated && hasIP && !internet && !checkingInternet && !attemptedInternet { checkInternet() }
     }
@@ -217,6 +246,12 @@ enum PasswordStore {
     }
     func connect() {
         startupPending = false
+        retryDeadline = nil
+        retryAttempt = 0
+        userRequestedStop = false
+        beginConnection()
+    }
+    private func beginConnection() {
         guard !busy else { return }
         guard adapter?.active == true else { error = true; message = "请先插好网线，并选择已接入的有线网卡。"; return }
         let service = realm.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -259,6 +294,7 @@ enum PasswordStore {
                 }.value
                 guard session == dir else { return }
                 authorizing = false
+                NotificationCenter.default.post(name: Notification.Name("inodeAuthorizationFinished"), object: nil)
                 if result.0 != 0 {
                     busy = false; error = true; message = usePEAP ? "PEAP 认证组件启动失败。" : "管理员授权取消或启动失败。"; addLog(message); cleanup()
                 } else { launchTime = Date(); message = "正在启动有线认证…" }
@@ -267,8 +303,11 @@ enum PasswordStore {
     }
     func disconnect() {
         startupPending = false
+        retryDeadline = nil
+        userRequestedStop = true
+        let hadSession = session != nil
         if let session { FileManager.default.createFile(atPath: session.appendingPathComponent("stop").path, contents: Data(), attributes: [.posixPermissions: 0o600]) }
-        authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; message = "正在断开有线认证…"
+        authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; message = hadSession ? "正在断开有线认证…" : "已取消自动重试。"
         if session == nil { busy = false }
     }
     private func cleanup() {
@@ -281,6 +320,13 @@ enum PasswordStore {
         }
         session = nil; terminated = false
     }
+    #if INODE_TESTING
+    func useSyntheticSession(_ directory: URL) {
+        session = directory
+        linesRead = 0
+        busy = true
+    }
+    #endif
     func forgetPassword() { PasswordStore.delete(credentialKey); password = ""; remember = false; UserDefaults.standard.set(false, forKey: "remember"); addLog("已移除此账号的钥匙串密码") }
     func setRemember(_ enabled: Bool) {
         remember = enabled
@@ -299,6 +345,14 @@ enum PasswordStore {
         autoConnect = enabled
         UserDefaults.standard.set(enabled, forKey: "autoConnect")
         if !enabled { startupPending = false }
+    }
+    func setRetryLimit(_ count: Int) {
+        retryLimit = min(10, max(0, count))
+        UserDefaults.standard.set(retryLimit, forKey: "retryLimit")
+        if retryAttempt >= retryLimit && retryScheduled {
+            retryDeadline = nil
+            message = "已取消自动重试。"
+        }
     }
     func setLaunchAtLogin(_ enabled: Bool) {
         do {
@@ -331,14 +385,18 @@ struct ContentView: View {
                 }.padding(.bottom, 18)
                 Text("连接步骤").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
                 step(1, "有线链路", model.adapter?.active == true ? "网线已接入" : "等待接入", model.adapter?.active == true)
-                step(2, "校园网认证", model.authenticated ? "已通过" : (model.busy ? "认证中" : "等待认证"), model.authenticated)
-                step(3, "网络地址", model.hasIP ? "已获取" : "等待获取", model.hasIP)
+                step(2, "校园网认证", model.authenticated ? "已通过" : (model.retryScheduled ? "即将重试" : (model.busy ? "认证中" : "等待认证")), model.authenticated)
+                step(3, "网络地址", model.hasIP ? "已获取" : (model.authenticated ? "等待获取" : "等待认证"), model.hasIP)
                 Divider()
                 Text("启动与显示").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 12) {
                     Toggle("开机自启", isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
                     Toggle("启动后自动连接", isOn: Binding(get: { model.autoConnect }, set: { model.setAutoConnect($0) }))
                     Toggle("在 Dock 显示图标", isOn: Binding(get: { model.showDockIcon }, set: { model.setShowDockIcon($0) }))
+                    Picker("失败后重试", selection: Binding(get: { model.retryLimit }, set: { model.setRetryLimit($0) })) {
+                        Text("不重试").tag(0)
+                        ForEach(1...10, id: \.self) { count in Text("\(count) 次").tag(count) }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
                 }.toggleStyle(.checkbox).font(.caption)
                 if !model.preferencesMessage.isEmpty {
                     Text(model.preferencesMessage).font(.caption2).foregroundStyle(.orange)
@@ -349,7 +407,9 @@ struct ContentView: View {
                 Spacer()
             }.padding(26).frame(width: 225).frame(maxHeight: .infinity).background(Color(nsColor: .controlBackgroundColor))
             Divider()
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
                 HStack(spacing: 22) {
                     Image(systemName: model.internet ? "checkmark.circle.fill" : (model.error ? "exclamationmark.circle.fill" : "cable.connector"))
                         .font(.system(size: 52, weight: .light)).foregroundStyle(model.error ? .orange : green)
@@ -361,7 +421,7 @@ struct ContentView: View {
                     Spacer()
                     if model.busy && !model.authenticated { ProgressView().controlSize(.small) }
                 }.padding(26).frame(maxWidth: .infinity, alignment: .leading).background(green.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
-                if !model.busy {
+                if !model.busy && !model.retryScheduled {
                     VStack(alignment: .leading, spacing: 15) {
                         HStack { Text("校园网账号").font(.headline); Spacer(); Text("宿舍有线 · 移动").font(.caption).foregroundStyle(.secondary) }
                         HStack(spacing: 14) {
@@ -405,27 +465,29 @@ struct ContentView: View {
                         Label("有线网卡", systemImage: "point.3.connected.trianglepath.dotted").foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
                         Picker("有线网卡", selection: $model.selected) {
                             ForEach(model.adapters) { a in Text("\(a.name) · \(a.id)\(a.active ? "（已接入）" : "")").tag(a.id) }
-                        }.labelsHidden().disabled(model.busy)
+                        }.labelsHidden().disabled(model.busy || model.retryScheduled)
                     }
                     Divider()
-                    info("IPv4 地址", "location", model.adapter?.ip.isEmpty == false ? model.adapter!.ip : "尚未取得有效地址")
+                    info("IPv4 地址", "location", model.hasIP ? (model.adapter?.ip ?? "") : (model.authenticated ? "尚未取得有效地址" : "认证后检查地址"))
                     Divider()
                     info("认证状态", "checkmark.shield", model.authenticated ? "校园网认证已通过" : "尚未通过认证")
                     Divider()
-                    info("网站访问", "globe", model.internetDetail)
+                    info("网络连通性", "globe", model.internetDetail)
                 }.padding(22).overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.1)))
-                Spacer(minLength: 0)
+                    }.padding(.horizontal, 30).padding(.top, 30).padding(.bottom, 18)
+                }
+                Divider()
                 HStack {
                     Button { model.showLog = true } label: { Label("连接日志", systemImage: "list.bullet.rectangle") }
                     Spacer()
                     Button { model.manualRefresh() } label: { Label("刷新状态", systemImage: "arrow.clockwise") }.disabled(model.checkingInternet && model.authenticated)
-                    if model.busy {
-                        Button(role: .destructive) { model.disconnect() } label: { Label("断开连接", systemImage: "xmark") }
+                    if model.busy || model.retryScheduled {
+                        Button(role: .destructive) { model.disconnect() } label: { Label(model.retryScheduled ? "取消重试" : "断开连接", systemImage: "xmark") }
                     } else {
                         Button { model.connect() } label: { Label("连接校园网", systemImage: "bolt.fill") }.buttonStyle(.borderedProminent).tint(green)
                     }
-                }.controlSize(.large)
-            }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
+                }.controlSize(.large).padding(.horizontal, 30).padding(.top, 16).padding(.bottom, 24)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }.frame(minWidth: 920, minHeight: 770).background(Color(nsColor: .windowBackgroundColor))
             .background(MinimizeOnClose().frame(width: 0, height: 0))
             .sheet(isPresented: $model.showLog) {
@@ -452,7 +514,7 @@ struct ContentView: View {
 }
 @MainActor final class AppLifecycle: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var model: Connection?
-    private var mainWindow: NSWindow?
+    private var mainWindow: NSPanel?
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
 
@@ -477,6 +539,8 @@ struct ContentView: View {
         for entry in menu.items where entry.action != nil { entry.target = self }
         item.menu = menu
         statusItem = item
+        NotificationCenter.default.addObserver(self, selector: #selector(restoreAfterAuthorization),
+                                               name: Notification.Name("inodeAuthorizationFinished"), object: nil)
 
         if !ProcessInfo.processInfo.arguments.contains("--launched-at-login") { openMainWindow() }
     }
@@ -486,10 +550,12 @@ struct ContentView: View {
     @objc private func openMainWindow() {
         guard let model else { return }
         if mainWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 780),
-                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                                  backing: .buffered, defer: false)
+            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 980, height: 780),
+                                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                 backing: .buffered, defer: false)
             window.title = "iNode for Mac"
+            window.hidesOnDeactivate = false
+            window.level = .normal
             window.minSize = NSSize(width: 920, height: 770)
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: ContentView(model: model))
@@ -503,6 +569,12 @@ struct ContentView: View {
 
     @objc private func quit() { NSApp.terminate(nil) }
 
+    @objc private func restoreAfterAuthorization() {
+        guard let window = mainWindow, !window.isMiniaturized, !window.isVisible else { return }
+        NSApp.unhideWithoutActivation()
+        window.orderFront(nil)
+    }
+
     func applicationWillTerminate(_ notification: Notification) { model?.disconnect() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -511,7 +583,9 @@ struct ContentView: View {
     }
 }
 
+#if !INODE_TESTING
 @main struct InodeMac: App {
     @NSApplicationDelegateAdaptor(AppLifecycle.self) private var lifecycle
     var body: some Scene { Settings { EmptyView() } }
 }
+#endif

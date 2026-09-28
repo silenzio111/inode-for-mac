@@ -8,6 +8,8 @@ xcrun swiftc -swift-version 5 Sources/WindowCloseBehavior.swift tests/window-clo
 .build/window-close-tests
 xcrun swiftc -swift-version 5 Sources/LoginItem.swift tests/login-item.swift -o .build/login-item-tests
 .build/login-item-tests
+xcrun swiftc -swift-version 5 -D INODE_TESTING -parse-as-library Sources/AccountFormat.swift Sources/LoginItem.swift Sources/WindowCloseBehavior.swift Sources/App.swift tests/connection-retry.swift -o .build/connection-retry-tests
+INODE_DISABLE_AUTO_CONNECT=1 .build/connection-retry-tests
 xcrun clang -fsanitize=address,undefined -g Sources/AppleEAP.c tests/apple-eap.c -framework CoreFoundation -o .build/apple-eap-tests
 .build/apple-eap-tests
 xcrun clang -fsanitize=address,undefined -g Sources/NativeIPC.c Sources/VendorNotice.c Sources/EAPTrace.c tests/native-ipc.c -liconv -lpcap -o .build/native-ipc-tests

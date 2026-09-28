@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
-version="0.7.0"
+version="0.7.1"
 mkdir -p dist/release
 python3 - <<'VERIFY'
 import json
@@ -21,7 +21,7 @@ for arch in arm64 x86_64; do
     cp LICENSE THIRD_PARTY.md "$stage/"
     cp licenses/sequoia-MIT.txt "$stage/UPSTREAM-MIT-LICENSE.txt"
     cat > "$stage/README.txt" <<'NOTES'
-iNode for Mac 0.7.0
+iNode for Mac 0.7.1
 
 此应用包含普通 iNode 认证所需的 H3C Mac E0585 引擎和配套库，来源于
 helson-lin/iNode_Client_Sequoia 固定提交 dd9ac3f26815c262a67a3e434bfaa2e6f178d510。

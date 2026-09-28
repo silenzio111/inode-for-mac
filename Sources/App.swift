@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 struct Adapter: Identifiable, Hashable {
     var id: String
@@ -429,15 +430,22 @@ func appleQuote(_ value: String) -> String {
 }
 
 let green = Color(red: 0.08, green: 0.55, blue: 0.36)
+private enum WindowLayout {
+    static let compactHeight: CGFloat = 490
+    static let editorHeight: CGFloat = 780
+    static let editorMinimumHeight: CGFloat = 770
+}
 struct ContentView: View {
     @ObservedObject var model: Connection
+    private var compact: Bool { model.authenticated }
     var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 28) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: compact ? 20 : 28) {
                 HStack(spacing: 10) {
                     Image(systemName: "network").font(.system(size: 24, weight: .semibold)).foregroundStyle(green)
                     VStack(alignment: .leading, spacing: 3) { Text("iNode for Mac").font(.headline); Text("西南财经大学").font(.caption).foregroundStyle(.secondary) }
-                }.padding(.bottom, 18)
+                }.padding(.bottom, compact ? 8 : 18)
                 Text("连接步骤").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
                 step(1, "有线链路", model.adapter?.active == true ? "网线已接入" : "等待接入", model.adapter?.active == true)
                 step(2, "校园网认证", model.authenticated ? "已通过" : (model.retryScheduled ? "即将重试" : (model.busy ? "认证中" : "等待认证")), model.authenticated)
@@ -459,8 +467,8 @@ struct ContentView: View {
                 if model.autoConnect && !model.remember {
                     Text("自动连接需要先保存账号密码并连接一次。").font(.caption2).foregroundStyle(.secondary)
                 }
-                Spacer()
-            }.padding(26).frame(width: 225).frame(maxHeight: .infinity).background(Color(nsColor: .controlBackgroundColor))
+                }.padding(26).frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(width: 225).background(Color(nsColor: .controlBackgroundColor))
             Divider()
             VStack(spacing: 0) {
                 ScrollView {
@@ -539,7 +547,8 @@ struct ContentView: View {
                     actionBar.padding(.horizontal, 30).padding(.top, 16).padding(.bottom, 24)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.frame(minWidth: 920, minHeight: 770).background(Color(nsColor: .windowBackgroundColor))
+        }.frame(minWidth: 920, minHeight: compact ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight)
+            .background(Color(nsColor: .windowBackgroundColor))
             .background(MinimizeOnClose().frame(width: 0, height: 0))
             .sheet(isPresented: $model.showLog) {
                 VStack(alignment: .leading, spacing: 18) {
@@ -580,6 +589,7 @@ struct ContentView: View {
     private var mainWindow: NSPanel?
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
+    private var windowSizeObservation: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let connection = Connection()
@@ -606,6 +616,9 @@ struct ContentView: View {
                                                name: Notification.Name("inodeAuthorizationFinished"), object: nil)
 
         if !ProcessInfo.processInfo.arguments.contains("--launched-at-login") { openMainWindow() }
+        windowSizeObservation = connection.$authenticated.removeDuplicates()
+            .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+            .sink { [weak self] connected in self?.resizeMainWindow(connected: connected) }
     }
 
     func menuWillOpen(_ menu: NSMenu) { statusMenuItem?.title = model?.headline ?? "iNode for Mac" }
@@ -613,13 +626,15 @@ struct ContentView: View {
     @objc private func openMainWindow() {
         guard let model else { return }
         if mainWindow == nil {
-            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 980, height: 780),
+            let height = model.authenticated ? WindowLayout.compactHeight : WindowLayout.editorHeight
+            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 980, height: height),
                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                  backing: .buffered, defer: false)
             window.title = "iNode for Mac"
             window.hidesOnDeactivate = false
             window.level = .normal
-            window.minSize = NSSize(width: 920, height: 770)
+            let minimumContentHeight = model.authenticated ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight
+            window.minSize = NSSize(width: 920, height: frameHeight(for: minimumContentHeight, in: window))
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: ContentView(model: model))
             window.center()
@@ -628,6 +643,31 @@ struct ContentView: View {
         if mainWindow?.isMiniaturized == true { mainWindow?.deminiaturize(nil) }
         mainWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func frameHeight(for contentHeight: CGFloat, in window: NSWindow) -> CGFloat {
+        window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: 980, height: contentHeight)).height
+    }
+
+    private func resizeMainWindow(connected: Bool) {
+        guard let window = mainWindow else { return }
+        let contentHeight = connected ? WindowLayout.compactHeight : WindowLayout.editorHeight
+        let minimumContentHeight = connected ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight
+        let targetHeight = frameHeight(for: contentHeight, in: window)
+        let minimumSize = NSSize(width: 920, height: frameHeight(for: minimumContentHeight, in: window))
+        if connected { window.minSize = minimumSize }
+        guard abs(window.frame.height - targetHeight) > 1 else {
+            window.minSize = minimumSize
+            return
+        }
+        var frame = window.frame
+        frame.origin.y += frame.height - targetHeight
+        frame.size.height = targetHeight
+        if let visible = window.screen?.visibleFrame, frame.minY < visible.minY {
+            frame.origin.y = visible.minY
+        }
+        window.setFrame(frame, display: true, animate: window.isVisible)
+        if !connected { window.minSize = minimumSize }
     }
 
     @objc private func quit() { NSApp.terminate(nil) }

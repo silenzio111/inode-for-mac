@@ -339,6 +339,7 @@ struct ContentView: View {
                 }.controlSize(.large)
             }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
         }.frame(minWidth: 920, minHeight: 770).background(Color(nsColor: .windowBackgroundColor))
+            .background(MinimizeOnClose().frame(width: 0, height: 0))
             .sheet(isPresented: $model.showLog) {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack { Text("连接日志").font(.title2.bold()); Spacer(); Button("关闭") { model.showLog = false } }
@@ -363,6 +364,7 @@ struct ContentView: View {
     }
 }
 @main struct InodeMac: App {
+    @NSApplicationDelegateAdaptor(AppLifecycle.self) private var lifecycle
     var body: some Scene {
         WindowGroup("iNode for Mac") { ContentView() }.windowStyle(.titleBar).defaultSize(width: 980, height: 780)
             .commands { CommandGroup(replacing: .newItem) {} }

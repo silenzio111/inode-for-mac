@@ -4,6 +4,8 @@ cd "${0:A:h:h}"
 mkdir -p .build
 xcrun swiftc Sources/AccountFormat.swift tests/account-format.swift -o .build/account-format-tests
 .build/account-format-tests
+xcrun swiftc -swift-version 5 Sources/WindowCloseBehavior.swift tests/window-close.swift -o .build/window-close-tests
+.build/window-close-tests
 xcrun clang -fsanitize=address,undefined -g Sources/AppleEAP.c tests/apple-eap.c -framework CoreFoundation -o .build/apple-eap-tests
 .build/apple-eap-tests
 xcrun clang -fsanitize=address,undefined -g Sources/NativeIPC.c Sources/VendorNotice.c Sources/EAPTrace.c tests/native-ipc.c -liconv -lpcap -o .build/native-ipc-tests

@@ -26,7 +26,7 @@ PYCOPY
 fi
 xcrun clang -arch "$arch" -mmacosx-version-min=13.0 -O2 -Wall -Wextra Sources/NativeIPC.c Sources/VendorNotice.c Sources/EAPTrace.c Sources/AppleEAP.c Sources/VendorHelper.c -framework CoreFoundation -liconv -lpcap -o "$app/Contents/Resources/inode-helper"
 
-xcrun swiftc -swift-version 5 -O -target "${arch}-apple-macos13.0" -parse-as-library Sources/AccountFormat.swift Sources/App.swift -o "$app/Contents/MacOS/InodeMac"
+xcrun swiftc -swift-version 5 -O -target "${arch}-apple-macos13.0" -parse-as-library Sources/AccountFormat.swift Sources/WindowCloseBehavior.swift Sources/App.swift -o "$app/Contents/MacOS/InodeMac"
 cp assets/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 cp LICENSE "$app/Contents/Resources/PROJECT-LICENSE.txt"
 cp THIRD_PARTY.md "$app/Contents/Resources/THIRD_PARTY.md"
@@ -41,8 +41,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>InodeMac</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.5.0</string>
-<key>CFBundleVersion</key><string>17</string>
+<key>CFBundleShortVersionString</key><string>0.5.1</string>
+<key>CFBundleVersion</key><string>18</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

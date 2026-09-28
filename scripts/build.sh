@@ -21,12 +21,16 @@ import shutil,sys
 src=Path('.build/vendor-mac');dst=Path(sys.argv[1])
 shutil.copytree(src,dst,symlinks=True,ignore=shutil.ignore_patterns('log','ipc-node'))
 (dst/'log').mkdir();(dst/'ipc-node').mkdir()
+(dst/'inodesys.conf').write_text('INSTALL_DIR=.\n')
 PYCOPY
 fi
 xcrun clang -arch "$arch" -mmacosx-version-min=13.0 -O2 -Wall -Wextra Sources/NativeIPC.c Sources/VendorNotice.c Sources/EAPTrace.c Sources/AppleEAP.c Sources/VendorHelper.c -framework CoreFoundation -liconv -lpcap -o "$app/Contents/Resources/inode-helper"
 
 xcrun swiftc -swift-version 5 -O -target "${arch}-apple-macos13.0" -parse-as-library Sources/AccountFormat.swift Sources/App.swift -o "$app/Contents/MacOS/InodeMac"
 cp assets/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp LICENSE "$app/Contents/Resources/PROJECT-LICENSE.txt"
+cp THIRD_PARTY.md "$app/Contents/Resources/THIRD_PARTY.md"
+cp licenses/sequoia-MIT.txt "$app/Contents/Resources/UPSTREAM-MIT-LICENSE.txt"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

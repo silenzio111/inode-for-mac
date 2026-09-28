@@ -6,9 +6,9 @@
 
 ## 下载与安装
 
-从 [Releases](https://github.com/silenzio111/inode-for-mac/releases) 下载对应芯片的 ZIP：`arm64` 用于 M 系列芯片，`x86_64` 用于 Intel。解压后可将 `iNode for Mac.app` 移至“应用程序”。两个包分别包含对应架构的应用和辅助程序，普通认证所需的原厂引擎本身是 x86_64，因此 M 系列芯片使用普通认证还需要 [Rosetta 2](https://support.apple.com/102527)。
+从 [Releases](https://github.com/silenzio111/inode-for-mac/releases) 下载对应芯片的 ZIP：`arm64` 用于 M 系列芯片，`x86_64` 用于 Intel。解压后可将 `iNode for Mac.app` 移至“应用程序”。两个包分别包含对应架构的应用和辅助程序，并附带普通认证所需的 H3C Mac PC 7.3 (E0585) 原厂引擎及配套库；该引擎本身是 x86_64，因此 M 系列芯片使用普通认证还需要 [Rosetta 2](https://support.apple.com/102527)。
 
-**公开发行包不附带 H3C 原厂二进制。**需要普通认证时，请先通过其他网络联网，在解压目录运行 `Install Engine.command`。该脚本从 [`helson-lin/iNode_Client_Sequoia`](https://github.com/helson-lin/iNode_Client_Sequoia) 取得固定提交 `dd9ac3f26815c262a67a3e434bfaa2e6f178d510`，只在当前 Mac 的 `~/Library/Application Support/iNode for Mac/vendor-mac` 准备组件。安装脚本需要 Xcode Command Line Tools；macOS 若提示缺少开发者工具，请先安装。普通认证首次启动会请求管理员授权。公开包未经 Apple Developer ID 公证，首次打开可能需到“系统设置 → 隐私与安全性”允许。
+H3C 组件来自 [`helson-lin/iNode_Client_Sequoia`](https://github.com/helson-lin/iNode_Client_Sequoia) 的固定提交 `dd9ac3f26815c262a67a3e434bfaa2e6f178d510`。本项目的 GPL 许可仅覆盖自编源码，**不将 H3C 原厂组件声明为开源**；上游封装项目的 MIT 声明也不能替代原厂组件的权利归属。详情见 [THIRD_PARTY.md](THIRD_PARTY.md)。普通认证首次启动会请求管理员授权。公开包未经 Apple Developer ID 公证，首次打开可能需到“系统设置 → 隐私与安全性”允许。
 
 已经使用旧版连接时，无须为更新图标断开网络；方便重新连接时再退出旧版并打开新版。
 
@@ -24,12 +24,11 @@
 
 ```sh
 ./scripts/create_icon.sh
-INODE_INCLUDE_VENDOR=0 INODE_ARCH=arm64 ./scripts/build.sh
-INODE_INCLUDE_VENDOR=0 INODE_ARCH=x86_64 ./scripts/build.sh
+INODE_ENGINE_DESTINATION="$PWD/.build/vendor-mac" ./scripts/install_engine.sh
 ./scripts/package_release.sh
 ```
 
-`INODE_INCLUDE_VENDOR=0` 生成与公开发行包相同的无原厂二进制应用。普通认证在本机运行 `./scripts/install_engine.sh` 后使用。若已合法取得并在 `.build/vendor-mac` 准备了本地原厂组件，默认 `./scripts/build.sh` 可以制作仅供本机使用的自带组件构建；请勿公开分发该包。
+`install_engine.sh` 从固定提交取得组件并在本地准备，不执行上游安装脚本。`package_release.sh` 将组件分别打入 ARM 与 Intel 应用包。如只需自行编译本项目源码、不打入第三方二进制，可使用 `INODE_INCLUDE_VENDOR=0 INODE_ARCH=arm64 ./scripts/build.sh`（Intel 改为 `x86_64`）；此时普通认证需要另行在本机安装组件。
 
 ```sh
 ./scripts/test.sh
@@ -41,4 +40,4 @@ INODE_APP_OUTPUT='dist/release/iNode for Mac-arm64.app' python3 scripts/test_pea
 
 ## 许可与来源
 
-本项目源码按 [GPL-3.0-or-later](LICENSE) 发布。普通认证报文布局参考的项目与许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。H3C 原厂引擎及库有独立权利归属，不属于本仓库许可证，也不包含在公开仓库和发行包内。
+本项目源码按 [GPL-3.0-or-later](LICENSE) 发布。普通认证报文布局参考的项目与许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。H3C 原厂引擎及库有独立权利归属，不属于本仓库许可证；它们不纳入源码仓库，但包含于发行包。

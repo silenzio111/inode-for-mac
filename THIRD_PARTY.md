@@ -2,7 +2,7 @@
 
 本项目使用 GPL-3.0-or-later 发布（完整许可见 LICENSE）。H3C EAP Identity、Notification、客户端版本双向 XOR 编码与账号/密码响应的报文布局，参考 njit8021xclient 系列公开实现；认证组件为针对 macOS libpcap 编写的实现。
 
-公开发行包不包含 H3C 原厂可执行文件、动态库、学校安装包或从第三方项目提取的原厂资源。`Install Engine.command` 由用户在本机运行，从上游项目取得固定提交并在本机准备组件。Apple Silicon 上的普通认证通过 Rosetta 2 运行原厂 x86_64 引擎；本项目自己的界面和辅助程序分别编译为 arm64 与 x86_64。
+源码仓库不包含 H3C 原厂可执行文件、动态库或学校安装包。发行包包含从 helson-lin/iNode_Client_Sequoia 固定提交提取的 H3C 引擎与配套库，来源、提交和原始文件 SHA256 记录在应用内 `vendor-mac/source.json`。Apple Silicon 上的普通认证通过 Rosetta 2 运行原厂 x86_64 引擎；本项目自己的界面和辅助程序分别编译为 arm64 与 x86_64。H3C 原厂组件不因封装项目声明 MIT 或本项目使用 GPL 而改变其独立权利归属。
 
 - 刘群及 njit8021xclient 贡献者：https://github.com/liuqun/njit8021xclient
 - bitdust/njit8021xclient：https://github.com/bitdust/njit8021xclient
@@ -21,11 +21,11 @@
 0.2.0 原厂引擎后端：
 - IPC TLV 载荷与西财选项顺序参考 qfzlm/inode-modern（MIT）：https://github.com/qfzlm/inode-modern 。许可完整文本附在 licenses/inode-modern-MIT.txt。
 - Mac 命名管道帧由学校原厂组件的控制接口独立核对，并以无凭据状态查询验证。
-- H3C Mac 原厂引擎与库是第三方 proprietary software。本机由学校官方客户端下载包提取，用于用户的本地适配；不受本仓库 GPL/MIT 许可覆盖，不应作为公开发布包重新分发。
+- H3C Mac 原厂引擎与库是第三方 proprietary software，不受本仓库 GPL/MIT 许可覆盖。公开发行包会明确列出其来源和独立权利归属。
 0.3.0 Sequoia 引擎后端：
 - 用户指定的项目：https://github.com/helson-lin/iNode_Client_Sequoia ，提交 dd9ac3f26815c262a67a3e434bfaa2e6f178d510。
 - 使用其 PC 7.3 (E0585) 原厂引擎、完整配套库、custom 与提示资源，在应用私有目录运行；没有覆盖系统库目录或执行 preinstall/postinstall。
-- 仓库的封装脚本标为 MIT，但其中 H3C 原厂二进制不因此变为 MIT；仅作为用户本机适配组件使用，不公开再分发。
+- 仓库的封装脚本标为 MIT，但其中 H3C 原厂二进制不因此变为 MIT；发行包单独说明其来源和权利归属。
 - 版本与原始文件摘要记录在打包资源 vendor-mac/source.json。
 - 0.3.1 根据两版 Mac 库内置参数字典分别编码本地 IPC 字段：E0524 的 QUICK_RESUME/REAUTH_TIMES/REAUTH_INTERVAL 为 30/31/32，E0585 为 48/49/50。未改动引擎认证算法。
 - 0.3.2 的移动 @cm 账号格式来源于用户提供的西财电脑义务维修队教程 Mac 部分，及学校 Mac 安装指导；教程未再分发。未修改原厂 PAP 密码处理或联网报文算法。

@@ -18,6 +18,46 @@ func run(_ path: String, _ args: [String]) -> (Int32, String) {
         return (p.terminationStatus, String(data: bytes, encoding: .utf8) ?? "")
     } catch { return (-1, error.localizedDescription) }
 }
+private func runBounded(_ path: String, _ args: [String], timeout: TimeInterval = 3) -> (Int32, String) {
+    let process = Process(); process.executableURL = URL(fileURLWithPath: path); process.arguments = args
+    let output = Pipe(); process.standardOutput = output; process.standardError = output
+    let finished = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in finished.signal() }
+    do {
+        try process.run()
+        if finished.wait(timeout: .now() + timeout) == .timedOut {
+            if process.isRunning { process.terminate() }
+            if finished.wait(timeout: .now() + 1) == .timedOut {
+                if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
+                _ = finished.wait(timeout: .now() + 1)
+            }
+            return (-1, "")
+        }
+        let bytes = output.fileHandleForReading.readDataToEndOfFile()
+        return (process.terminationStatus, String(data: bytes, encoding: .utf8) ?? "")
+    } catch { return (-1, "") }
+}
+private func scanAdapters() -> [Adapter]? {
+    let hardware = runBounded("/usr/sbin/networksetup", ["-listallhardwareports"])
+    guard hardware.0 == 0 else { return nil }
+    var found: [Adapter] = []
+    for block in hardware.1.components(separatedBy: "\n\n") {
+        let lines = block.components(separatedBy: "\n")
+        guard let port = lines.first(where: { $0.hasPrefix("Hardware Port: ") }),
+              let dev = lines.first(where: { $0.hasPrefix("Device: ") }) else { continue }
+        let name = String(port.dropFirst(15)), id = String(dev.dropFirst(8))
+        if name == "Wi-Fi" || name == "AirPort" || name == "Thunderbolt Bridge" || name == "雷雳网桥" || !id.hasPrefix("en") { continue }
+        let config = runBounded("/sbin/ifconfig", [id])
+        guard config.0 == 0 else { return nil }
+        let ip = config.1.components(separatedBy: "\n").compactMap { line -> String? in
+            let words = line.split(whereSeparator: { $0.isWhitespace })
+            guard words.count > 1, words[0] == "inet", !words[1].hasPrefix("169.254.") else { return nil }
+            return String(words[1])
+        }.first ?? ""
+        found.append(Adapter(id: id, name: name, active: config.1.contains("status: active"), ip: ip))
+    }
+    return found.sorted { $0.active && !$1.active }
+}
 private func canReachSite(_ url: String, on interface: String) -> Bool {
     let result = run("/usr/bin/curl", ["--ipv4", "--interface", "if!\(interface)", "--noproxy", "*", "--connect-timeout", "4", "--max-time", "7", "--max-redirs", "0", "--silent", "--output", "/dev/null", "--write-out", "%{http_code}", url])
     let status = Int(result.1.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
@@ -62,12 +102,15 @@ func appleQuote(_ value: String) -> String {
     private var linesRead = 0
     private var timer: Timer?
     private var lastScan = Date.distantPast
+    private var scanInFlight = false
+    private var scanCompletions: [() -> Void] = []
     private var launchTime = Date.distantPast
     private var terminated = false
     private var authorizing = false
     private var attemptedInternet = false
     private var startupPending = false
     private var startupProbePending = true
+    private var startupIPWaitSince: Date?
     #if INODE_TESTING
     private let automaticEthernetProbeEnabled = false
     #else
@@ -75,7 +118,15 @@ func appleQuote(_ value: String) -> String {
     #endif
     private var ethernetProbeRunning = false
     private var ethernetProbeGeneration = 0
+    private var monitorPassiveEthernet = false
     private var detectedEthernetAddress: String?
+    private var lastInternetCheck = Date.distantPast
+    private var lastInternetAddress: String?
+    private var internetProbeGeneration = 0
+    private var sessionInterface: String?
+    private var failureStopRequested = false
+    private var stopDeadline: Date?
+    private var restoredPEAPPid: pid_t?
     private var retryAttempt = 0
     @Published private(set) var retryDeadline: Date?
     private var userRequestedStop = false
@@ -142,6 +193,13 @@ func appleQuote(_ value: String) -> String {
            RestartHandoff.isPrivateDirectory(previous, prefix: "inode-"),
            FileManager.default.fileExists(atPath: previous.appendingPathComponent("events").path) {
             session = previous
+            let savedInterface = try? String(contentsOf: previous.appendingPathComponent("interface"), encoding: .utf8)
+            sessionInterface = savedInterface?.trimmingCharacters(in: .whitespacesAndNewlines) ?? selected
+            if authMode == "peap",
+               let text = try? String(contentsOf: previous.appendingPathComponent("helper-pid"), encoding: .utf8),
+               let number = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), number > 1 {
+                restoredPEAPPid = number
+            }
             busy = true
             authorizing = false
             launchTime = Date()
@@ -165,26 +223,39 @@ func appleQuote(_ value: String) -> String {
         logs.append("\(f.string(from: Date()))  \(s)")
         if logs.count > 150 { logs.removeFirst(logs.count - 150) }
     }
-    func refresh() {
-        let output = run("/usr/sbin/networksetup", ["-listallhardwareports"]).1
-        var found: [Adapter] = []
-        for block in output.components(separatedBy: "\n\n") {
-            let lines = block.components(separatedBy: "\n")
-            guard let port = lines.first(where: { $0.hasPrefix("Hardware Port: ") }),
-                  let dev = lines.first(where: { $0.hasPrefix("Device: ") }) else { continue }
-            let name = String(port.dropFirst(15)), id = String(dev.dropFirst(8))
-            if name == "Wi-Fi" || name.contains("Thunderbolt") || name.contains("雷雳") || !id.hasPrefix("en") { continue }
-            let config = run("/sbin/ifconfig", [id]).1
-            let ip = config.components(separatedBy: "\n").compactMap { line -> String? in
-                let words = line.split(whereSeparator: { $0.isWhitespace })
-                guard words.count > 1, words[0] == "inet", !words[1].hasPrefix("169.254.") else { return nil }
-                return String(words[1])
-            }.first ?? ""
-            found.append(Adapter(id: id, name: name, active: config.contains("status: active"), ip: ip))
-        }
-        adapters = found.sorted { $0.active && !$1.active }
-        if !found.contains(where: { $0.id == selected }), let first = adapters.first { selectAdapter(first.id) }
+    func refresh(after: (() -> Void)? = nil) {
+        if let after { scanCompletions.append(after) }
+        guard !scanInFlight else { return }
+        scanInFlight = true
         lastScan = Date()
+        #if INODE_TESTING
+        finishScan(scanAdapters())
+        #else
+        Task {
+            let result = await Task.detached(priority: .utility) { scanAdapters() }.value
+            finishScan(result)
+        }
+        #endif
+    }
+    private func finishScan(_ result: [Adapter]?) {
+        scanInFlight = false
+        if let result { applyAdapterScan(result) }
+        else { addLog("有线网卡扫描未完成，将在下一轮重试") }
+        let completions = scanCompletions
+        scanCompletions.removeAll()
+        completions.forEach { $0() }
+    }
+    func applyAdapterScan(_ found: [Adapter]) {
+        let previousAddress = adapter?.ip ?? ""
+        let activeSessionLinkLost = sessionInterface.map { interface in
+            found.first(where: { $0.id == interface })?.active != true
+        } ?? false
+        adapters = found
+        if activeSessionLinkLost { requestSessionStopForFailure("认证所用的网卡已断开，等待网线接入后自动重试。") }
+        if !found.contains(where: { $0.id == selected }), let first = found.first { selectAdapter(first.id) }
+        if session == nil && !busy && previousAddress.isEmpty && !(adapter?.ip ?? "").isEmpty {
+            startupProbePending = true
+        }
         if detectedEthernetOnline && (adapter?.active != true || adapter?.ip != detectedEthernetAddress) {
             detectedEthernetOnline = false
             detectedEthernetAddress = nil
@@ -194,11 +265,18 @@ func appleQuote(_ value: String) -> String {
             attemptedInternet = false
             startupProbePending = true
             startupPending = autoConnect && !account.isEmpty && !password.isEmpty
+            startupIPWaitSince = nil
             message = "有线网络状态已改变，正在重新检查。"
         }
-        if authenticated && adapter?.active != true {
-            disconnect(); error = true; message = "网线已断开，请重新连接。"
+        if authenticated, let lastInternetAddress, adapter?.ip != lastInternetAddress {
+            internet = false
+            googleReachable = nil
+            baiduReachable = nil
+            attemptedInternet = false
+            lastInternetCheck = .distantPast
+            self.lastInternetAddress = nil
         }
+        if session == nil { probeEthernetIfAvailable() }
     }
     func loadPassword() {
         guard let saved = try? CredentialStore.load(),
@@ -208,6 +286,7 @@ func appleQuote(_ value: String) -> String {
     func selectAdapter(_ identifier: String) {
         guard selected != identifier else { return }
         cancelEthernetProbe()
+        monitorPassiveEthernet = false
         selected = identifier
         UserDefaults.standard.set(identifier, forKey: "adapter")
         if detectedEthernetOnline {
@@ -219,12 +298,14 @@ func appleQuote(_ value: String) -> String {
             attemptedInternet = false
         }
         startupProbePending = true
+        startupIPWaitSince = nil
         if session == nil && !busy { message = "正在检查所选有线网卡…" }
     }
     func tick() {
+        reapRestoredPEAPIfNeeded()
         if Date().timeIntervalSince(lastScan) >= 2 { refresh() }
         if startupProbePending && session == nil { probeEthernetIfAvailable() }
-        if startupPending && !ethernetProbeRunning && adapter?.active == true {
+        if startupPending && !scanInFlight && !startupProbePending && !ethernetProbeRunning && adapter?.active == true {
             startupPending = false
             addLog("使用上次保存的配置自动连接")
             connect()
@@ -240,9 +321,14 @@ func appleQuote(_ value: String) -> String {
                 message = "等待网线接入后自动重试…"
             }
         }
+        if monitorPassiveEthernet && session == nil && !ethernetProbeRunning && !scanInFlight &&
+            !startupProbePending && Date().timeIntervalSince(lastInternetCheck) >= 30,
+            let adapter, adapter.active, !adapter.ip.isEmpty { startEthernetProbe(on: adapter) }
         guard let session else { return }
         let text = (try? String(contentsOf: session.appendingPathComponent("events"), encoding: .utf8)) ?? ""
-        let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
+        let completeText = text.lastIndex(of: "\n").map { String(text[...$0]) } ?? ""
+        let lines = completeText.split(separator: "\n").map(String.init)
+        if lines.count < linesRead { linesRead = 0 }
         if lines.count > linesRead {
             for line in lines.dropFirst(linesRead) {
                 let parts = line.components(separatedBy: "\t"); guard parts.count >= 2 else { continue }
@@ -251,7 +337,14 @@ func appleQuote(_ value: String) -> String {
                 if state == "authenticated" { authenticated = true; retryAttempt = 0; error = false; message = detail }
                 else if state == "starting" && !error { message = "正在准备校园网认证…" }
                 else if state == "phase" && !authenticated && !error { message = detail }
-                else if state == "error" || state == "expired" { error = true; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; message = detail }
+                else if state == "error" || state == "expired" {
+                    error = true; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; message = detail
+                    if authMode == "vendor" && stopDeadline == nil {
+                        stopDeadline = Date().addingTimeInterval(8)
+                        FileManager.default.createFile(atPath: session.appendingPathComponent("stop").path,
+                                                       contents: Data(), attributes: [.posixPermissions: 0o600])
+                    }
+                }
                 else if state == "stopped" {
                     busy = false; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; terminated = true
                     if !error { message = detail }
@@ -261,7 +354,20 @@ func appleQuote(_ value: String) -> String {
         }
         let startupTimeout: TimeInterval = authMode == "vendor" ? 60 : 15
         if busy && !authorizing && lines.isEmpty && Date().timeIntervalSince(launchTime) > startupTimeout {
-            disconnect(); busy = false; terminated = true; error = true; message = "认证组件未启动，请查看日志或重试管理员授权。"
+            failSessionStartup("认证组件未启动，请查看日志或重试管理员授权。")
+        }
+        if busy && !terminated && FileManager.default.fileExists(atPath: session.appendingPathComponent("finished").path) {
+            busy = false; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; terminated = true
+            if !userRequestedStop && !error {
+                error = true; message = "认证组件意外退出，正在准备重试。"; addLog(message)
+            }
+        }
+        if busy && !terminated, let stopDeadline, Date() >= stopDeadline {
+            if let brokerDirectory { PrivilegeBroker.stop(in: brokerDirectory); self.brokerDirectory = nil }
+            if authMode == "peap" { signalPEAPProcess(in: session, signal: SIGKILL) }
+            busy = false; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil
+            attemptedInternet = false; terminated = true
+            addLog("认证组件未及时结束，已请求后台组件停止")
         }
         if terminated {
             cleanup()
@@ -274,16 +380,69 @@ func appleQuote(_ value: String) -> String {
             return
         }
         if authenticated && !hasIP { waitForAddress() }
-        if authenticated && hasIP && !internet && !checkingInternet && !attemptedInternet { checkInternet() }
+        if authenticated && hasIP && !checkingInternet &&
+            (!attemptedInternet || Date().timeIntervalSince(lastInternetCheck) >= 30) { checkInternet() }
+    }
+    private func reapRestoredPEAPIfNeeded() {
+        guard let pid = restoredPEAPPid else { return }
+        var status: Int32 = 0
+        let observed = Darwin.waitpid(pid, &status, WNOHANG)
+        if observed == pid || (observed == -1 && errno == ECHILD && Darwin.kill(pid, 0) == -1 && errno == ESRCH) {
+            restoredPEAPPid = nil
+            if let session, busy {
+                FileManager.default.createFile(atPath: session.appendingPathComponent("finished").path,
+                                               contents: Data(), attributes: [.posixPermissions: 0o600])
+            }
+        }
+    }
+    private func signalPEAPProcess(in session: URL, signal: Int32) {
+        guard let text = try? String(contentsOf: session.appendingPathComponent("helper-pid"), encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 else { return }
+        var status: Int32 = 0
+        let observed = Darwin.waitpid(pid, &status, WNOHANG)
+        if observed == 0 { Darwin.kill(pid, signal) }
+        else if observed == pid {
+            FileManager.default.createFile(atPath: session.appendingPathComponent("finished").path,
+                                           contents: Data(), attributes: [.posixPermissions: 0o600])
+        }
+    }
+    private func requestSessionStopForFailure(_ reason: String) {
+        guard let session, !failureStopRequested else { return }
+        failureStopRequested = true
+        if authMode == "vendor" { stopDeadline = Date().addingTimeInterval(8) }
+        internetProbeGeneration += 1
+        FileManager.default.createFile(atPath: session.appendingPathComponent("stop").path,
+                                       contents: Data(), attributes: [.posixPermissions: 0o600])
+        authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false
+        error = true; message = reason; addLog(reason)
+    }
+    private func failSessionStartup(_ reason: String) {
+        guard !failureStopRequested else { return }
+        requestSessionStopForFailure(reason)
+        if let brokerDirectory { PrivilegeBroker.stop(in: brokerDirectory); self.brokerDirectory = nil }
+        if authMode == "peap" { stopDeadline = Date().addingTimeInterval(8) }
+        if authMode == "peap", let session { signalPEAPProcess(in: session, signal: SIGTERM) }
     }
     private func waitForAddress() {
         internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false
         message = "正在等待学校服务器分配 IP 地址…"
     }
     private func probeEthernetIfAvailable() {
-        guard automaticEthernetProbeEnabled, startupProbePending, let adapter, adapter.active else { return }
+        guard startupProbePending else { return }
+        guard automaticEthernetProbeEnabled else { startupProbePending = false; return }
+        guard let adapter, adapter.active, session == nil, !busy else { return }
+        if adapter.ip.isEmpty {
+            if startupPending {
+                if startupIPWaitSince == nil { startupIPWaitSince = Date() }
+                if let started = startupIPWaitSince, Date().timeIntervalSince(started) >= 4 {
+                    startupProbePending = false
+                    startupIPWaitSince = nil
+                }
+            }
+            return
+        }
         startupProbePending = false
-        guard !adapter.ip.isEmpty, session == nil, !busy else { return }
+        startupIPWaitSince = nil
         startEthernetProbe(on: adapter)
     }
     private func startEthernetProbe(on adapter: Adapter) {
@@ -312,18 +471,25 @@ func appleQuote(_ value: String) -> String {
         googleReachable = result.google
         baiduReachable = result.baidu
         attemptedInternet = true
+        lastInternetCheck = Date()
         if result.google || result.baidu {
+            let wasMonitored = monitorPassiveEthernet
+            monitorPassiveEthernet = true
             detectedEthernetOnline = true
             detectedEthernetAddress = address
             internet = true
             startupPending = false
             error = false
             message = "选中的有线网卡可正常上网，无需重复认证。"
-            addLog("启动检测：所选有线网卡可正常上网，跳过重复认证")
+            addLog(wasMonitored ? "有线网卡网络复查通过" : "启动检测：所选有线网卡可正常上网，跳过重复认证")
         } else {
+            let wasOnline = detectedEthernetOnline
             detectedEthernetOnline = false
             detectedEthernetAddress = nil
             internet = false
+            if wasOnline && autoConnect && !account.isEmpty && !password.isEmpty && !userRequestedStop {
+                startupPending = true
+            }
             message = startupPending ? "有线网络尚未连通，准备使用上次配置认证…" : "有线网络尚未连通，请连接校园网。"
             addLog("所选有线网卡网络测试未通过")
         }
@@ -333,15 +499,19 @@ func appleQuote(_ value: String) -> String {
         ethernetProbeRunning = false
         checkingInternet = false
         startupProbePending = false
+        startupIPWaitSince = nil
     }
     func checkInternet() {
         guard let current = session, authenticated, hasIP else { return }
         let testedAddress = adapter?.ip
         let interface = selected
+        internetProbeGeneration += 1
+        let generation = internetProbeGeneration
         checkingInternet = true; attemptedInternet = true
         message = "已取得有线 IP 地址，正在检测网络连通性…"
         Task {
             let result = await checkGoogleAndBaidu(on: interface)
+            guard generation == internetProbeGeneration else { return }
             guard session == current, authenticated else { checkingInternet = false; return }
             guard hasIP, selected == interface, adapter?.ip == testedAddress else {
                 checkingInternet = false; attemptedInternet = false
@@ -351,23 +521,32 @@ func appleQuote(_ value: String) -> String {
             googleReachable = result.google; baiduReachable = result.baidu
             internet = result.google || result.baidu
             checkingInternet = false
+            lastInternetCheck = Date()
+            lastInternetAddress = testedAddress
             message = internet ? "网络连接正常。" : "校园网认证已通过，网络连接测试未通过。"
             addLog("所选有线网卡网络测试：\(internetDetail)；认证状态单独判定")
-            // Mark this attempt as finished; retry only on explicit refresh.
+            // The timer will recheck connectivity after the regular interval.
         }
     }
     func manualRefresh() {
-        refresh()
-        if session == nil, let adapter, adapter.active, !adapter.ip.isEmpty {
-            startEthernetProbe(on: adapter)
-            return
+        refresh { [weak self] in
+            guard let self else { return }
+            if self.session == nil, let adapter = self.adapter, adapter.active, !adapter.ip.isEmpty {
+                self.startEthernetProbe(on: adapter)
+                return
+            }
+            guard self.authenticated else { return }
+            guard self.hasIP else { self.waitForAddress(); return }
+            if !self.checkingInternet {
+                self.attemptedInternet = false; self.internet = false; self.googleReachable = nil; self.baiduReachable = nil
+                self.checkInternet()
+            }
         }
-        guard authenticated else { return }
-        guard hasIP else { waitForAddress(); return }
-        if !checkingInternet { attemptedInternet = false; internet = false; googleReachable = nil; baiduReachable = nil; checkInternet() }
     }
     func connect() {
         cancelEthernetProbe()
+        monitorPassiveEthernet = false
+        internetProbeGeneration += 1
         detectedEthernetOnline = false
         detectedEthernetAddress = nil
         internet = false
@@ -403,12 +582,17 @@ func appleQuote(_ value: String) -> String {
             catch { addLog("清除本机加密凭据失败") }
         }
         cleanup()
+        sessionInterface = selected
+        failureStopRequested = false
+        stopDeadline = nil
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("inode-" + UUID().uuidString)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             let content = "\(selected)\n\(submittedAccount)\n\(password)\n\(xorMode ? 1 : 0)\n\(ProcessInfo.processInfo.processIdentifier)\n\(service)\n\(serviceGBK ? "GBK" : "UTF-8")\n"
             let config = dir.appendingPathComponent("credentials")
             FileManager.default.createFile(atPath: config.path, contents: Data(content.utf8), attributes: [.posixPermissions: 0o600])
+            FileManager.default.createFile(atPath: dir.appendingPathComponent("interface").path,
+                                           contents: Data(selected.utf8), attributes: [.posixPermissions: 0o600])
             FileManager.default.createFile(atPath: dir.appendingPathComponent("events").path, contents: Data(), attributes: [.posixPermissions: 0o600])
             session = dir; linesRead = 0; busy = true; authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; checkingInternet = false; error = false; terminated = false; authorizing = true; attemptedInternet = false
             let usePEAP = authMode == "peap"
@@ -439,7 +623,21 @@ func appleQuote(_ value: String) -> String {
                         let process = Process(); process.executableURL = helper
                         process.arguments = ["--peap-session", dir.path]
                         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-                        do { try process.run(); return (0, "") } catch { return (-1, "") }
+                        do {
+                            try process.run()
+                            guard FileManager.default.createFile(atPath: dir.appendingPathComponent("helper-pid").path,
+                                                                 contents: Data(String(process.processIdentifier).utf8),
+                                                                 attributes: [.posixPermissions: 0o600]) else {
+                                process.terminate(); process.waitUntilExit()
+                                return (-1, "")
+                            }
+                            Task.detached {
+                                process.waitUntilExit()
+                                FileManager.default.createFile(atPath: dir.appendingPathComponent("finished").path,
+                                                               contents: Data(), attributes: [.posixPermissions: 0o600])
+                            }
+                            return (0, "")
+                        } catch { return (-1, "") }
                     }
                     guard let broker else { return (-1, "") }
                     let command = shellQuote(helper.path) + " --broker " + shellQuote(broker.path) +
@@ -463,14 +661,21 @@ func appleQuote(_ value: String) -> String {
     }
     func disconnect() {
         cancelEthernetProbe()
+        monitorPassiveEthernet = false
+        internetProbeGeneration += 1
         detectedEthernetOnline = false
         detectedEthernetAddress = nil
         startupPending = false
         retryDeadline = nil
         userRequestedStop = true
         let hadSession = session != nil
-        if let session { FileManager.default.createFile(atPath: session.appendingPathComponent("stop").path, contents: Data(), attributes: [.posixPermissions: 0o600]) }
+        if let session {
+            FileManager.default.createFile(atPath: session.appendingPathComponent("stop").path,
+                                           contents: Data(), attributes: [.posixPermissions: 0o600])
+            if authMode == "vendor" { stopDeadline = Date().addingTimeInterval(8) }
+        }
         authenticated = false; internet = false; googleReachable = nil; baiduReachable = nil; attemptedInternet = false; message = hadSession ? "正在断开有线认证…" : "已取消自动重试。"
+        lastInternetAddress = nil
         if session == nil { busy = false }
     }
     func shutdownBroker() {
@@ -490,14 +695,23 @@ func appleQuote(_ value: String) -> String {
                 try? FileManager.default.removeItem(at: session)
             }
         }
-        session = nil; terminated = false
+        session = nil; sessionInterface = nil; failureStopRequested = false; stopDeadline = nil; terminated = false
     }
     #if INODE_TESTING
     func useSyntheticSession(_ directory: URL) {
         session = directory
+        sessionInterface = selected
         linesRead = 0
         busy = true
     }
+    func useSyntheticInternetResult(address: String) {
+        authenticated = true
+        internet = true
+        attemptedInternet = true
+        lastInternetAddress = address
+        lastInternetCheck = Date()
+    }
+    func expireSyntheticStopDeadline() { stopDeadline = .distantPast }
     #endif
     func forgetPassword() {
         do {

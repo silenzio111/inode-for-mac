@@ -55,6 +55,9 @@ static int session_main(int argc,char **argv,const char *vendor_template_overrid
     fd=open(out,O_WRONLY|O_APPEND|O_NOFOLLOW);if(fd<0) return 2;
     if(fstat(fd,&cs) || !S_ISREG(cs.st_mode) || cs.st_uid!=ds.st_uid || (cs.st_mode&077)!=0) {close(fd);return 2;}
     events=fdopen(fd,"a");signal(SIGTERM,stop_signal);signal(SIGINT,stop_signal);
+    /* A vendor FIFO can lose its reader before cleanup sends the final request.
+     * Handle EPIPE as an ordinary failure so the session always logs stopped. */
+    signal(SIGPIPE,SIG_IGN);
     if(!strcmp(argv[1],"--peap-session")) {
         int result=apple_eap_run(dev,user,pass,parent_pid,stop,&stopped,event);
         wipe_password(pass,sizeof(pass));fclose(events);return result;

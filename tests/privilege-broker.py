@@ -29,6 +29,9 @@ with tempfile.TemporaryDirectory(prefix='inode-broker-test-') as root:
             while (control / 'request').exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
             assert not (control / 'request').exists()
+            while not (session / 'finished').exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert (session / 'finished').exists(), 'Broker must report a child that exits without a stopped event'
             assert process.poll() is None, 'Broker should survive a failed child session'
         (control / 'quit').touch(mode=0o600)
         assert process.wait(timeout=5) == 0

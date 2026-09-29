@@ -22,6 +22,12 @@ import Foundation
         precondition(alreadyOnline.detectedEthernetOnline && alreadyOnline.hasIP && alreadyOnline.internet)
         precondition(!alreadyOnline.authenticated, "A website probe must not claim an engine authentication result")
         precondition(alreadyOnline.headline == "已连接")
+        alreadyOnline.applyEthernetProbeResult((google: false, baidu: false), interface: "en-test", address: "10.0.0.8")
+        precondition(!alreadyOnline.detectedEthernetOnline && !alreadyOnline.internet,
+                     "A later failed Ethernet probe must clear a stale connected state")
+        alreadyOnline.applyEthernetProbeResult((google: false, baidu: true), interface: "en-test", address: "10.0.0.8")
+        precondition(alreadyOnline.detectedEthernetOnline && alreadyOnline.internet,
+                     "A subsequent successful probe must restore the connected state")
         alreadyOnline.selectAdapter("en-other")
         precondition(!alreadyOnline.detectedEthernetOnline && !alreadyOnline.internet,
                      "Changing the selected adapter must clear the old Ethernet result")
@@ -58,6 +64,9 @@ import Foundation
         progress.useSyntheticSession(progressDirectory)
         progress.tick()
         precondition(progress.message == "正在准备校园网认证…", "Technical notices must stay in the log")
+        try "starting\tTechnical engine startup\nnotice\tE0585 control fields 48/49/50\nphase\t正在等待".write(to: progressEvents, atomically: true, encoding: .utf8)
+        progress.tick()
+        precondition(progress.message == "正在准备校园网认证…", "An incomplete event line must wait for its newline")
         try "starting\tTechnical engine startup\nnotice\tE0585 control fields 48/49/50\nphase\t正在等待校园网认证结果…\n".write(to: progressEvents, atomically: true, encoding: .utf8)
         progress.tick()
         precondition(progress.message == "正在等待校园网认证结果…", "User-facing phases should update the banner")
@@ -91,6 +100,71 @@ import Foundation
         disabled.useSyntheticSession(third)
         disabled.tick()
         precondition(!disabled.retryScheduled, "Zero retry limit must disable automatic retry")
-        print("Ethernet-only startup result, authentication-gated IP status, progress, retry, and cancellation passed")
+
+        let crashed = Connection()
+        crashed.retryLimit = 3
+        let crashedDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("inode-crashed-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: crashedDirectory, withIntermediateDirectories: false)
+        try "starting\tHelper started\n".write(to: crashedDirectory.appendingPathComponent("events"), atomically: true, encoding: .utf8)
+        FileManager.default.createFile(atPath: crashedDirectory.appendingPathComponent("finished").path, contents: Data())
+        crashed.useSyntheticSession(crashedDirectory)
+        crashed.tick()
+        precondition(crashed.retryScheduled && !crashed.busy,
+                     "A helper that exits without stopped must end the UI session and schedule retry")
+
+        let neverStarted = Connection()
+        neverStarted.authMode = "vendor"
+        neverStarted.retryLimit = 3
+        let emptyDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("inode-empty-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: emptyDirectory, withIntermediateDirectories: false)
+        FileManager.default.createFile(atPath: emptyDirectory.appendingPathComponent("events").path, contents: Data())
+        neverStarted.useSyntheticSession(emptyDirectory)
+        neverStarted.tick()
+        precondition(neverStarted.busy && !neverStarted.retryScheduled,
+                     "A startup timeout must request helper shutdown before reusing the session")
+        neverStarted.expireSyntheticStopDeadline()
+        neverStarted.tick()
+        precondition(neverStarted.retryScheduled && !neverStarted.busy,
+                     "A component startup timeout is an internal failure, not a user cancellation")
+
+        let peapNeverStarted = Connection()
+        peapNeverStarted.authMode = "peap"
+        peapNeverStarted.retryLimit = 3
+        let peapDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("inode-peap-empty-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: peapDirectory, withIntermediateDirectories: false)
+        FileManager.default.createFile(atPath: peapDirectory.appendingPathComponent("events").path, contents: Data())
+        peapNeverStarted.useSyntheticSession(peapDirectory)
+        peapNeverStarted.tick()
+        peapNeverStarted.expireSyntheticStopDeadline()
+        peapNeverStarted.tick()
+        precondition(peapNeverStarted.retryScheduled && !peapNeverStarted.busy,
+                     "A PEAP startup timeout should also schedule retry after stopping its helper")
+
+        let swapped = Connection()
+        swapped.retryLimit = 3
+        swapped.adapters = [Adapter(id: "en-old", name: "Old Ethernet", active: true, ip: "10.0.0.8")]
+        swapped.selected = "en-old"
+        let swappedDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("inode-swapped-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: swappedDirectory, withIntermediateDirectories: false)
+        let swappedEvents = swappedDirectory.appendingPathComponent("events")
+        try "starting\tHelper started\n".write(to: swappedEvents, atomically: true, encoding: .utf8)
+        swapped.useSyntheticSession(swappedDirectory)
+        swapped.authenticated = true
+        swapped.applyAdapterScan([Adapter(id: "en-new", name: "New Ethernet", active: true, ip: "10.0.0.9")])
+        precondition(!swapped.authenticated && swapped.selected == "en-new" &&
+                     FileManager.default.fileExists(atPath: swappedDirectory.appendingPathComponent("stop").path),
+                     "Authentication on a removed adapter must not transfer to another adapter")
+        try "starting\tHelper started\nstopped\tOld adapter stopped\n".write(to: swappedEvents, atomically: true, encoding: .utf8)
+        swapped.tick()
+        precondition(swapped.retryScheduled, "A lost authentication adapter should retry after the old session stops")
+
+        let renewed = Connection()
+        renewed.adapters = [Adapter(id: "en-ip", name: "Ethernet", active: true, ip: "10.0.0.8")]
+        renewed.selected = "en-ip"
+        renewed.useSyntheticInternetResult(address: "10.0.0.8")
+        renewed.applyAdapterScan([Adapter(id: "en-ip", name: "Ethernet", active: true, ip: "10.0.0.9")])
+        precondition(!renewed.internet && renewed.headline != "已连接",
+                     "An IP change must invalidate connectivity measured on the old address")
+        print("Ethernet startup, helper exit, timeout, adapter replacement, retry, and cancellation passed")
     }
 }

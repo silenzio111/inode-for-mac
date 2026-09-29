@@ -80,6 +80,18 @@ static int child_session(const char *request, uid_t owner, char *session, size_t
     return 1;
 }
 
+static void mark_session_finished(const char *session, uid_t owner) {
+    int directory = open(session, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (directory < 0) return;
+    struct stat details;
+    if (!fstat(directory, &details) && S_ISDIR(details.st_mode) &&
+        details.st_uid == owner && !(details.st_mode & 077)) {
+        int marker = openat(directory, "finished", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        if (marker >= 0) close(marker);
+    }
+    close(directory);
+}
+
 int privilege_broker_run(const char *directory, const char *parent_text,
                          const char *helper_path, BrokerSessionRunner run_session) {
     struct stat control;
@@ -110,17 +122,23 @@ int privilege_broker_run(const char *directory, const char *parent_text,
     close(fd);
     signal(SIGTERM, broker_stop); signal(SIGINT, broker_stop);
     pid_t child = 0;
+    char active_session[1024] = {0};
     while (!broker_stopping && access(quit, F_OK) != 0 && kill(parent, 0) == 0) {
         if (child) {
             int status;
-            if (waitpid(child, &status, WNOHANG) == child) child = 0;
+            if (waitpid(child, &status, WNOHANG) == child) {
+                child = 0;
+                mark_session_finished(active_session, control.st_uid);
+                active_session[0] = 0;
+            }
         }
         if (!child) {
             char session[1024];
             if (child_session(request, control.st_uid, session, sizeof(session))) {
                 child = fork();
                 if (child == 0) _exit(run_session(session, vendor_template));
-                if (child < 0) child = 0;
+                if (child < 0) { child = 0; mark_session_finished(session, control.st_uid); }
+                else snprintf(active_session, sizeof(active_session), "%s", session);
             }
         }
         struct timespec pause = {.tv_sec = 0, .tv_nsec = 100000000};
@@ -134,6 +152,7 @@ int privilege_broker_run(const char *directory, const char *parent_text,
             nanosleep(&pause, NULL);
         }
         if (child) { kill(child, SIGKILL); waitpid(child, NULL, 0); }
+        mark_session_finished(active_session, control.st_uid);
     }
     unlink(request); unlink(ready); unlink(quit); rmdir(directory);
     remove_snapshot(snapshot_root);

@@ -58,15 +58,22 @@ private func scanAdapters() -> [Adapter]? {
     }
     return found.sorted { $0.active && !$1.active }
 }
-private func canReachSite(_ url: String, on interface: String) -> Bool {
-    let result = run("/usr/bin/curl", ["--ipv4", "--interface", "if!\(interface)", "--noproxy", "*", "--connect-timeout", "4", "--max-time", "7", "--max-redirs", "0", "--silent", "--output", "/dev/null", "--write-out", "%{http_code}", url])
+private func canReachSite(_ url: String, on interface: String, expectedStatus: ClosedRange<Int>) -> Bool {
+    let result = run("/usr/bin/curl", ["-q", "--ipv4", "--interface", "if!\(interface)", "--proxy", "", "--noproxy", "*", "--proto", "=https", "--connect-timeout", "4", "--max-time", "7", "--max-redirs", "0", "--silent", "--output", "/dev/null", "--write-out", "%{http_code}", url])
     let status = Int(result.1.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-    return result.0 == 0 && (200...299).contains(status)
+    return result.0 == 0 && expectedStatus.contains(status)
 }
-private func checkGoogleAndBaidu(on interface: String) async -> (google: Bool, baidu: Bool) {
-    let google = Task.detached { canReachSite("https://www.google.com/generate_204", on: interface) }
-    let baidu = Task.detached { canReachSite("https://www.baidu.com/", on: interface) }
-    return (await google.value, await baidu.value)
+private func checkGoogleAndBaidu(on interface: String, address: String) async -> (google: Bool, baidu: Bool) {
+    let google = Task.detached { canReachSite("https://www.google.com/generate_204", on: interface, expectedStatus: 204...204) }
+    let baidu = Task.detached { canReachSite("https://www.baidu.com/", on: interface, expectedStatus: 200...299) }
+    let direct = Task.detached(priority: .utility) {
+        directEthernetHTTPSChecks(interface: interface, address: address)
+    }
+    let pinned = Task.detached(priority: .utility) { dnsPinnedBaiduHTTPS(on: interface) }
+    let curlResult = (await google.value, await baidu.value)
+    let directResult = await direct.value
+    let pinnedBaidu = await pinned.value
+    return (curlResult.0 || directResult.google, curlResult.1 || directResult.baidu || pinnedBaidu)
 }
 func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 func appleQuote(_ value: String) -> String {
@@ -455,7 +462,7 @@ func appleQuote(_ value: String) -> String {
         message = "正在通过所选有线网卡检测网络连接…"
         let interface = adapter.id, address = adapter.ip
         Task {
-            let result = await checkGoogleAndBaidu(on: interface)
+            let result = await checkGoogleAndBaidu(on: interface, address: address)
             guard generation == ethernetProbeGeneration else { return }
             ethernetProbeRunning = false
             checkingInternet = false
@@ -504,13 +511,14 @@ func appleQuote(_ value: String) -> String {
     func checkInternet() {
         guard let current = session, authenticated, hasIP else { return }
         let testedAddress = adapter?.ip
+        guard let testedAddress, !testedAddress.isEmpty else { waitForAddress(); return }
         let interface = selected
         internetProbeGeneration += 1
         let generation = internetProbeGeneration
         checkingInternet = true; attemptedInternet = true
         message = "已取得有线 IP 地址，正在检测网络连通性…"
         Task {
-            let result = await checkGoogleAndBaidu(on: interface)
+            let result = await checkGoogleAndBaidu(on: interface, address: testedAddress)
             guard generation == internetProbeGeneration else { return }
             guard session == current, authenticated else { checkingInternet = false; return }
             guard hasIP, selected == interface, adapter?.ip == testedAddress else {
@@ -893,7 +901,14 @@ struct ContentView: View {
                 }
                 if !model.busy && !model.retryScheduled {
                     Divider()
-                    actionBar.padding(.horizontal, 30).padding(.top, 16).padding(.bottom, 24)
+                    VStack(alignment: .leading, spacing: 10) {
+                        if !model.campusReady {
+                            Label("建议在认证完成后再启用代理软件", systemImage: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        actionBar
+                    }.padding(.horizontal, 30).padding(.top, 14).padding(.bottom, 20)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }.frame(minWidth: 920, minHeight: compact ? WindowLayout.compactHeight : WindowLayout.editorMinimumHeight)

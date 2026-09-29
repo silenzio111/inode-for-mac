@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
-version="0.7.6"
+version="1.0.0"
 mkdir -p dist/release
 python3 - <<'VERIFY'
 import json
@@ -21,8 +21,10 @@ for arch in arm64 x86_64; do
     cp LICENSE THIRD_PARTY.md "$stage/"
     cp licenses/sequoia-MIT.txt "$stage/UPSTREAM-MIT-LICENSE.txt"
     cat > "$stage/README.txt" <<'NOTES'
-iNode for Mac 0.7.6 beta 1
+iNode for Mac 1.0.0
 
+建议在认证完成后再启用代理软件。
+网络检测仅访问 Google 和百度：使用禁用代理配置的 HTTPS、直接 TLS 和处理虚拟 DNS 的地址复核；仅所选有线网卡实际访问成功才显示联网正常。
 主界面和菜单栏均可重启应用；重启会接管仍在运行的授权组件与认证会话。
 启动时会先通过所选有线网卡测试 Google 与百度；任一可访问即显示已连接，不重复认证。
 启动时有线网卡暂时没有地址会等待约 4 秒；连接后每约 30 秒复查网络连通性。
